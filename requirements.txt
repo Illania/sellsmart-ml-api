@@ -1,0 +1,15 @@
+pandas
+numpy
+scikit-learn
+xgboost
+yfinance
+joblib
+matplotlib
+tqdm
+python-dotenv
+torch
+transformers
+datasets
+fastapi
+uvicorn
+dotenv
