@@ -14,7 +14,7 @@ fi
 mkdir -p data/cache/live_news
 
 TODAY=$(date +%F)
-FROM=$(date -v-30d +%F)
+FROM=$(date -d "30 days ago" +%F)
 
 for TICKER in AAPL MSFT NVDA AMZN GOOGL META TSLA AMD NFLX JPM CRM ADBE INTC QCOM PYPL INSM
 do
