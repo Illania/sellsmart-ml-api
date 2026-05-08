@@ -1,6 +1,7 @@
 #!/bin/zsh
 
-cd /Users/annagulich/Desktop/sellsmart-ml || exit 1
+# uncomment for local run
+# cd /Users/annagulich/Desktop/sellsmart-ml || exit 1
 
 if [ -f .env ]; then
   export $(grep -v '^#' .env | xargs)
