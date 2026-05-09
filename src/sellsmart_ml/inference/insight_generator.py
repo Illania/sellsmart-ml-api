@@ -787,6 +787,11 @@ def generate_insight(
         "date": str(latest_row.get("date")),
         "horizon": HORIZON,
 
+        "current_price": round(
+        float(latest_row.get("close", 0)),
+        2,
+        ),
+
         "risk_score": risk_score,
         "probability_of_drop": round(probability, 4),
 
