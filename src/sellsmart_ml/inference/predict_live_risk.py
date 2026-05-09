@@ -31,6 +31,7 @@ from sellsmart_ml.dataset.build_price_dataset import (
 from sellsmart_ml.features.news_features import add_news_features
 from sellsmart_ml.features.price_features import add_price_features
 from sellsmart_ml.inference.insight_generator import generate_insight
+from sellsmart_ml.storage.supabase_news import get_company_news_from_supabase
 
 warnings.simplefilter("ignore", PerformanceWarning)
 
@@ -288,8 +289,8 @@ def fetch_finnhub_company_news(
     csv_cache_file = NEWS_CACHE_DIR / f"{ticker}_news.csv"
     raw_cache_file = NEWS_CACHE_DIR / f"{ticker}_raw_news.json"
 
-    # 1. Prefer processed CSV cache
-    if csv_cache_file.exists():
+    # 1. Prefer processed CSV cache, unless forced refresh
+    if csv_cache_file.exists() and not force_refresh:
         print(f"Loading cached processed news for {ticker}...")
         cached = pd.read_csv(csv_cache_file, parse_dates=["date"])
 
@@ -298,8 +299,36 @@ def fetch_finnhub_company_news(
 
         return cached
 
-    # 2. Fallback to raw Finnhub JSON cache
-    if raw_cache_file.exists():
+    # 2. Try Supabase shared news cache
+    try:
+        print(f"Loading news from Supabase for {ticker}...")
+        supabase_news = get_company_news_from_supabase(
+            ticker=ticker,
+            days_back=days_back,
+            limit=50,
+        )
+
+        if not supabase_news.empty:
+            supabase_news = (
+                supabase_news
+                .drop_duplicates(subset=["ticker", "date", "text"])
+                .sort_values(["date"], ascending=False)
+                .head(50)
+                .sort_values(["ticker", "date"])
+                .reset_index(drop=True)
+            )
+
+            supabase_news.to_csv(csv_cache_file, index=False)
+
+            print("News rows from Supabase:", len(supabase_news))
+
+            return supabase_news
+
+    except Exception as exc:
+        print(f"WARNING: failed to load news from Supabase for {ticker}: {exc}")
+
+    # 3. Fallback to raw Finnhub JSON cache
+    if raw_cache_file.exists() and not force_refresh:
         print(f"Loading cached raw news for {ticker}...")
 
         try:
@@ -362,9 +391,52 @@ def fetch_finnhub_company_news(
 
         return news_df
 
-    # 3. No cache
-    print(f"WARNING: no cached news found for {ticker}.")
-    return make_fallback_news_row(ticker, status="fallback")
+    # 4. Last resort: direct Finnhub fetch from API container
+    print(f"No shared/cache news found for {ticker}. Trying Finnhub live...")
+
+    api_key = os.getenv("FINNHUB_API_KEY")
+
+    if not api_key:
+        print("WARNING: FINNHUB_API_KEY is not set.")
+        return make_fallback_news_row(ticker, status="fallback")
+
+    to_date = date.today()
+    from_date = to_date - timedelta(days=days_back)
+
+    try:
+        response = requests.get(
+            "https://finnhub.io/api/v1/company-news",
+            params={
+                "symbol": ticker,
+                "from": from_date.isoformat(),
+                "to": to_date.isoformat(),
+                "token": api_key,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    except Exception as exc:
+        print(f"WARNING: Finnhub request failed for {ticker}: {exc}")
+        return make_fallback_news_row(ticker, status="fallback")
+
+    if not isinstance(data, list):
+        print(f"WARNING: unexpected Finnhub response for {ticker}: {data}")
+        return make_fallback_news_row(ticker, status="fallback")
+
+    raw_cache_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(raw_cache_file, "w") as f:
+        json.dump(data, f)
+
+    # Re-enter function and parse raw cache
+    return fetch_finnhub_company_news(
+        ticker=ticker,
+        days_back=days_back,
+        force_refresh=False,
+    )
+
 
 # FINBERT SCORING
 # =========================================================
