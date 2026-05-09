@@ -50,3 +50,28 @@ def get_latest_prediction(ticker: str) -> dict | None:
     prediction["cache_generated_at"] = row["generated_at"]
 
     return prediction
+
+
+def get_all_latest_predictions() -> list[dict]:
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .table("latest_predictions")
+        .select("*")
+        .order("risk_score", desc=True)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    results = []
+
+    for row in rows:
+        prediction = row["prediction_json"]
+        prediction["cache_status"] = "supabase"
+        prediction["cache_generated_at"] = row["generated_at"]
+
+        results.append(prediction)
+
+    return results
