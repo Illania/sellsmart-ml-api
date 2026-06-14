@@ -3,9 +3,23 @@ from fastapi import FastAPI, Query
 from sellsmart_ml.storage.supabase_predictions import get_latest_prediction
 from sellsmart_ml.inference.predict_live_risk import predict_ticker_risk
 from sellsmart_ml.storage.supabase_predictions import get_all_latest_predictions
+from fastapi.middleware.cors import CORSMiddleware
 
 
 app = FastAPI(title="SellSmart Risk API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://sellsmart-site.vercel.app",
+        "https://sellsmart.asia",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
