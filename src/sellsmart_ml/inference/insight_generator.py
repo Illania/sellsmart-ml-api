@@ -890,6 +890,19 @@ def generate_insight(
             ),
         ))
 
+    if category == "high" and len(top_drivers) < 4:
+    top_drivers.append(Driver(
+        feature="model_consensus",
+        label="Strong model consensus",
+        direction="negative",
+        impact="high",
+        value=round(probability, 4),
+        message=(
+            "Multiple independent indicators are pointing "
+            "toward elevated downside risk."
+        ),
+    ))
+
     signal_conflict = get_signal_conflict(latest_row)
 
     return {
