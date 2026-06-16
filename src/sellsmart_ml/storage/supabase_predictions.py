@@ -1,19 +1,47 @@
-from __future__ import annotations
-
+import math
 import os
 from datetime import datetime, timezone
+from typing import Any
 
 from sellsmart_ml.storage.client import get_supabase
+
+
+def clean_json_value(value: Any) -> Any:
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+
+    if isinstance(value, dict):
+        return {
+            str(k): clean_json_value(v)
+            for k, v in value.items()
+        }
+
+    if isinstance(value, list):
+        return [
+            clean_json_value(v)
+            for v in value
+        ]
+
+    return value
 
 
 def save_latest_prediction(prediction: dict) -> None:
     supabase = get_supabase()
 
     ticker = prediction["ticker"].upper()
+    generated_at = datetime.now(timezone.utc).isoformat()
 
-    row = {
+    prediction = clean_json_value({
+        **prediction,
+        "generated_at": generated_at,
+        "cache_generated_at": generated_at,
+    })
+
+    row = clean_json_value({
         "ticker": ticker,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at,
         "prediction_date": prediction.get("date"),
         "horizon": prediction.get("horizon"),
         "risk_score": prediction.get("risk_score"),
@@ -24,9 +52,12 @@ def save_latest_prediction(prediction: dict) -> None:
         "news_status": prediction.get("news_status"),
         "market_regime": prediction.get("market_regime"),
         "prediction_json": prediction,
-    }
+    })
 
-    supabase.table("latest_predictions").upsert(row).execute()
+    supabase.table("latest_predictions").upsert(
+        row,
+        on_conflict="ticker",
+    ).execute()
 
 
 def get_latest_prediction(ticker: str) -> dict | None:
