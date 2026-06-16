@@ -100,7 +100,7 @@ def get_market_regime(row: pd.Series, category: str) -> str:
     moderate_selloff = ret_5 <= -0.05 or drawdown_20 <= -0.08
     oversold = 0 < rsi_14 <= 30
     high_volume = vol_ratio_20 >= 1.5
-    calm_market = vix < 20
+    calm_market = 0 < vix < 20
 
     if category == "low" and strong_selloff and oversold:
         return "Post-selloff stabilization"
@@ -150,6 +150,47 @@ def get_confidence(
         return "medium"
 
     return "low"
+
+
+def get_confidence_explanation(confidence: str) -> str:
+    return {
+        "high": "The model signal is relatively clear because the probability is far from the decision threshold.",
+        "medium": "The model signal is usable, but some indicators may be mixed.",
+        "low": "Signals are mixed or close to the decision threshold, so this should be interpreted cautiously.",
+    }[confidence]
+
+
+def get_signal_conflict(row: pd.Series) -> str | None:
+    ret_3 = _get(row, "ret_3")
+    ret_5 = _get(row, "ret_5")
+    neg_ratio_3d = _get(row, "neg_ratio_3d")
+    neg_count_1d = _get(row, "neg_count_1d")
+    vol_ratio_20 = _get(row, "vol_ratio_20")
+    rsi_14 = _get(row, "rsi_14")
+
+    if neg_ratio_3d >= 0.45 and ret_5 > 0.03:
+        return (
+            "News sentiment is negative, but price momentum remains positive. "
+            "This creates a mixed signal rather than a one-sided panic setup."
+        )
+
+    if neg_count_1d >= 5 and neg_ratio_3d < 0.35:
+        return (
+            "There has been some recent negative coverage, but the latest live news tone "
+            "does not appear strongly negative."
+        )
+
+    if ret_3 >= 0.06 and vol_ratio_20 < 1.1:
+        return (
+            "The stock has moved up quickly, but trading volume is not showing obvious panic behavior."
+        )
+
+    if rsi_14 <= 35 and ret_5 > 0:
+        return (
+            "Technical stress is present, but recent price action has started to recover."
+        )
+
+    return None
 
 
 def get_action_explanation(category: str, row: pd.Series | None = None) -> str:
@@ -281,13 +322,13 @@ def generate_price_drivers(row: pd.Series) -> list[Driver]:
     if ret_3 >= 0.06:
         drivers.append(Driver(
             feature="ret_3",
-            label="Sharp short-term run-up",
+            label="Sharp recent rally",
             direction="negative",
             impact="high",
             value=round(ret_3, 4),
             message=(
                 "The stock has risen very quickly over the last few sessions. "
-                "The model may interpret this as elevated pullback risk after a rapid move."
+                "Fast rallies can increase the chance of a short-term pullback."
             ),
         ))
     elif ret_2 >= 0.06:
@@ -438,6 +479,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
     earnings_news_count3d = _get(row, "earnings_news_count3d")
     guidance_cut_news_count3d = _get(row, "guidance_cut_news_count3d")
 
+    # Strongest sentiment signal only.
     if very_neg_count_1d >= 3:
         drivers.append(Driver(
             feature="very_neg_count_1d",
@@ -450,34 +492,19 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
                 "which may increase panic-risk pressure."
             ),
         ))
-
-    if neg_count_1d >= 5:
+    elif news_count_1d > 0 and neg_ratio_1d >= 0.6:
         drivers.append(Driver(
-            feature="neg_count_1d",
-            label="Negative news volume",
+            feature="neg_ratio_1d",
+            label="Negative news tone",
             direction="negative",
-            impact="medium",
-            value=int(neg_count_1d),
+            impact="high",
+            value=round(neg_ratio_1d, 3),
             message=(
-                "Recent news includes multiple negative articles, adding pressure "
-                "to investor sentiment."
+                "A high share of recent news coverage is negative, which can increase "
+                "emotional pressure on investors."
             ),
         ))
-
-    if news_count_1d >= 30:
-        drivers.append(Driver(
-            feature="news_count_1d",
-            label="Unusually active news flow",
-            direction="negative",
-            impact="medium",
-            value=int(news_count_1d),
-            message=(
-                "News activity is unusually high, which can amplify emotional reactions "
-                "around the stock."
-            ),
-        ))
-
-    if sentiment_min_1d <= -0.90:
+    elif sentiment_min_1d <= -0.90:
         drivers.append(Driver(
             feature="sentiment_min_1d",
             label="Severe negative article tone",
@@ -486,11 +513,55 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             value=round(sentiment_min_1d, 3),
             message="At least one recent article has extremely negative sentiment.",
         ))
+    elif sentiment_mean_1d <= -0.35:
+        drivers.append(Driver(
+            feature="sentiment_mean_1d",
+            label="Weak sentiment",
+            direction="negative",
+            impact="medium",
+            value=round(sentiment_mean_1d, 3),
+            message="Average news sentiment is clearly negative.",
+        ))
+    elif news_count_7d > 0 and neg_ratio_3d >= 0.45:
+        drivers.append(Driver(
+            feature="neg_ratio_3d",
+            label="Negative news trend",
+            direction="negative",
+            impact="medium",
+            value=round(neg_ratio_3d, 3),
+            message="News tone has been leaning negative over the last few days.",
+        ))
+
+    if neg_count_1d >= 5:
+        drivers.append(Driver(
+            feature="neg_count_1d",
+            label="Elevated recent negative coverage",
+            direction="negative",
+            impact="medium",
+            value=int(neg_count_1d),
+            message=(
+                "Several negative articles appeared recently, which may have influenced investor sentiment."
+            ),
+        ))
+
+    # Avoid duplicate "news flow" and "news spike" cards.
+    if news_count_1d >= 30 or news_spike_7d >= 2.0:
+        value = int(news_count_1d) if news_count_1d >= 30 else round(news_spike_7d, 2)
+        drivers.append(Driver(
+            feature="news_activity",
+            label="Elevated news activity",
+            direction="negative",
+            impact="medium",
+            value=value,
+            message=(
+                "News coverage is significantly higher than normal, which can amplify emotional reactions."
+            ),
+        ))
 
     if earnings_news_count3d >= 5:
         drivers.append(Driver(
             feature="earnings_news_count3d",
-            label="Earnings-related news pressure",
+            label="Earnings-related attention",
             direction="mixed",
             impact="medium",
             value=int(earnings_news_count3d),
@@ -511,48 +582,6 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
                 "Recent coverage contains guidance-cut language, which can increase "
                 "downside pressure."
             ),
-        ))
-
-    if news_count_1d > 0 and neg_ratio_1d >= 0.6:
-        drivers.append(Driver(
-            feature="neg_ratio_1d",
-            label="Negative news tone",
-            direction="negative",
-            impact="high",
-            value=round(neg_ratio_1d, 3),
-            message=(
-                "A high share of recent news coverage is negative, which can increase "
-                "emotional pressure on investors."
-            ),
-        ))
-    elif news_count_7d > 0 and neg_ratio_3d >= 0.45:
-        drivers.append(Driver(
-            feature="neg_ratio_3d",
-            label="Negative news trend",
-            direction="negative",
-            impact="medium",
-            value=round(neg_ratio_3d, 3),
-            message="News tone has been leaning negative over the last few days.",
-        ))
-
-    if sentiment_mean_1d <= -0.35:
-        drivers.append(Driver(
-            feature="sentiment_mean_1d",
-            label="Weak sentiment",
-            direction="negative",
-            impact="medium",
-            value=round(sentiment_mean_1d, 3),
-            message="Average news sentiment is clearly negative.",
-        ))
-
-    if news_spike_7d >= 2.0:
-        drivers.append(Driver(
-            feature="news_spike_7d",
-            label="News volume spike",
-            direction="negative",
-            impact="medium",
-            value=round(news_spike_7d, 2),
-            message="News activity is unusually high compared with the recent baseline.",
         ))
 
     if panic_news >= 1:
@@ -597,7 +626,13 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             message="Event-related news pressure is elevated and may be contributing to downside risk.",
         ))
 
-    if article_severity_score >= 1.5:
+    # Only add article severity if we did not already add a very similar severe-tone card.
+    already_has_severe_tone = any(
+        d.feature in {"very_neg_count_1d", "sentiment_min_1d", "sentiment_mean_1d"}
+        for d in drivers
+    )
+
+    if article_severity_score >= 1.5 and not already_has_severe_tone:
         drivers.append(Driver(
             feature="article_severity_score",
             label="Severe article tone",
@@ -613,27 +648,40 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
 def generate_supportive_signals(row: pd.Series) -> list[Driver]:
     drivers: list[Driver] = []
 
+    ret_3 = _get(row, "ret_3")
     ret_5 = _get(row, "ret_5")
     vol_ratio_20 = _get(row, "vol_ratio_20")
     rsi_14 = _get(row, "rsi_14")
+    neg_count_1d = _get(row, "neg_count_1d")
     neg_ratio_3d = _get(row, "neg_ratio_3d")
     vix = _get(row, "VIX")
 
-    # Moderate positive momentum
-    if 0.01 <= ret_5 < 0.05:
+    # Avoid direct contradiction with "Sharp recent rally".
+    if 0.01 <= ret_5 < 0.05 and ret_3 < 0.06:
         drivers.append(Driver(
             feature="ret_5",
-            label="Moderate positive momentum",
+            label="Constructive price momentum",
             direction="positive",
             impact="low",
             value=round(ret_5, 4),
             message=(
-                "The stock has shown moderate positive momentum "
-                "without an extreme short-term run-up."
+                "Price momentum is positive, but not extreme enough to suggest an overheated short-term move."
             ),
         ))
 
-    # Normal volume
+    # If there is a sharp short-term rally, phrase the supportive signal differently.
+    elif ret_5 > 0.01 and ret_3 >= 0.06:
+        drivers.append(Driver(
+            feature="ret_5",
+            label="Broader trend remains positive",
+            direction="positive",
+            impact="low",
+            value=round(ret_5, 4),
+            message=(
+                "Despite the fast recent rally, the broader price trend remains constructive."
+            ),
+        ))
+
     if 0.3 <= vol_ratio_20 < 1.1:
         drivers.append(Driver(
             feature="vol_ratio_20",
@@ -642,12 +690,10 @@ def generate_supportive_signals(row: pd.Series) -> list[Driver]:
             impact="low",
             value=round(vol_ratio_20, 2),
             message=(
-                "Volume is close to normal, suggesting "
-                "no obvious panic-volume spike."
+                "Volume is close to normal, suggesting no obvious panic-volume spike."
             ),
         ))
 
-    # Balanced RSI
     if 40 <= rsi_14 <= 65:
         drivers.append(Driver(
             feature="rsi_14",
@@ -656,28 +702,35 @@ def generate_supportive_signals(row: pd.Series) -> list[Driver]:
             impact="low",
             value=round(rsi_14, 1),
             message=(
-                "RSI is in a more balanced range, "
-                "without clear oversold stress."
+                "RSI is in a balanced range, without clear oversold stress."
             ),
         ))
 
-    # News tone not strongly negative
-    if (
-        get_news_status(row) == "live"
-        and 0 <= neg_ratio_3d < 0.35
-    ):
-        drivers.append(Driver(
-            feature="neg_ratio_3d",
-            label="No strong negative news pressure",
-            direction="positive",
-            impact="low",
-            value=round(neg_ratio_3d, 3),
-            message=(
-                "Recent live news tone does not look strongly negative."
-            ),
-        ))
+    # Avoid saying "no negative news pressure" when we also show many negative articles.
+    if get_news_status(row) == "live" and 0 <= neg_ratio_3d < 0.35:
+        if neg_count_1d >= 5:
+            drivers.append(Driver(
+                feature="neg_ratio_3d",
+                label="Current news tone is stabilizing",
+                direction="positive",
+                impact="low",
+                value=round(neg_ratio_3d, 3),
+                message=(
+                    "There was some recent negative coverage, but the latest live news tone does not appear strongly negative."
+                ),
+            ))
+        else:
+            drivers.append(Driver(
+                feature="neg_ratio_3d",
+                label="No strong negative news pressure",
+                direction="positive",
+                impact="low",
+                value=round(neg_ratio_3d, 3),
+                message=(
+                    "Recent live news tone does not look strongly negative."
+                ),
+            ))
 
-    # VIX only if valid
     if 0 < vix < 20:
         drivers.append(Driver(
             feature="VIX",
@@ -714,6 +767,57 @@ def rank_drivers(drivers: list[Driver], max_drivers: int = 5) -> list[Driver]:
         ),
         reverse=True,
     )[:max_drivers]
+
+
+def filter_low_risk_stress_signals(drivers: list[Driver]) -> list[Driver]:
+    """
+    For very low-risk stocks, avoid showing too many scary yellow/red news boxes.
+    Keep only the clearest warnings.
+    """
+    priority_features = {
+        "very_neg_count_1d",
+        "neg_ratio_1d",
+        "guidance_cut_news_count3d",
+        "panic_news",
+        "negative_event_cluster",
+        "event_pressure_score",
+        "ret_5",
+        "drawdown_20",
+        "vol_ratio_20",
+    }
+
+    filtered = [
+        d for d in drivers
+        if d.impact == "high" or d.feature in priority_features
+    ]
+
+    return rank_drivers(filtered, max_drivers=3)
+
+
+def filter_supportive_signals(
+    supportive_signals: list[Driver],
+    negative_drivers: list[Driver],
+) -> list[Driver]:
+    negative_features = {d.feature for d in negative_drivers}
+    negative_labels = {d.label for d in negative_drivers}
+
+    filtered: list[Driver] = []
+
+    for signal in supportive_signals:
+        # Prevent direct feature-level contradiction.
+        if signal.feature in negative_features and signal.feature != "ret_5":
+            continue
+
+        # Prevent direct wording contradiction with sharp rally.
+        if (
+            signal.label == "Constructive price momentum"
+            and "Sharp recent rally" in negative_labels
+        ):
+            continue
+
+        filtered.append(signal)
+
+    return filtered[:3]
 
 
 def driver_to_dict(driver: Driver) -> dict[str, Any]:
@@ -756,6 +860,10 @@ def generate_insight(
     )
 
     supportive_signals = generate_supportive_signals(latest_row)
+    supportive_signals = filter_supportive_signals(
+        supportive_signals=supportive_signals,
+        negative_drivers=negative_drivers,
+    )
 
     ranked_negative_signals = rank_drivers(
         negative_drivers,
@@ -764,7 +872,7 @@ def generate_insight(
 
     if category == "low":
         top_drivers = []
-        stress_signals = ranked_negative_signals
+        stress_signals = filter_low_risk_stress_signals(ranked_negative_signals)
     else:
         top_drivers = ranked_negative_signals
         stress_signals = []
@@ -782,14 +890,16 @@ def generate_insight(
             ),
         ))
 
+    signal_conflict = get_signal_conflict(latest_row)
+
     return {
         "ticker": ticker,
         "date": str(latest_row.get("date")),
         "horizon": HORIZON,
 
         "current_price": round(
-        float(latest_row.get("close", 0)),
-        2,
+            float(latest_row.get("close", 0)),
+            2,
         ),
 
         "risk_score": risk_score,
@@ -802,8 +912,11 @@ def generate_insight(
         "action_label": action_label,
 
         "confidence": confidence,
+        "confidence_explanation": get_confidence_explanation(confidence),
+
         "news_status": news_status,
         "market_regime": market_regime,
+        "signal_conflict": signal_conflict,
 
         "summary": build_summary(
             ticker=ticker,
@@ -821,7 +934,7 @@ def generate_insight(
 
         "stress_signals": [
             driver_to_dict(driver)
-            for driver in stress_signals[:5]
+            for driver in stress_signals[:3]
         ],
 
         "supportive_signals": [
