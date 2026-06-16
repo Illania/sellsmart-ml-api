@@ -15,6 +15,8 @@ app.add_middleware(
         "http://localhost:3000",
         "https://sellsmart-site.vercel.app",
         "https://sellsmart.asia",
+        "https://sellsmart-ui.vercel.app",
+        "https://www.sellsmart.asia",
     ],
     allow_credentials=False,
     allow_methods=["*"],
