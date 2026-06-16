@@ -458,6 +458,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
     drivers: list[Driver] = []
 
     news_count_1d = _get(row, "news_count_1d")
+    news_count_3d = _get(row, "news_count_3d")
     news_count_7d = _get(row, "news_count_7d")
 
     neg_count_1d = _get(row, "neg_count_1d")
@@ -479,7 +480,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
     earnings_news_count3d = _get(row, "earnings_news_count3d")
     guidance_cut_news_count3d = _get(row, "guidance_cut_news_count3d")
 
-    # Strongest sentiment signal only.
+    # 1. Strongest negative sentiment signal only
     if very_neg_count_1d >= 3:
         drivers.append(Driver(
             feature="very_neg_count_1d",
@@ -487,10 +488,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             direction="negative",
             impact="high",
             value=int(very_neg_count_1d),
-            message=(
-                "Several recent articles have strongly negative sentiment, "
-                "which may increase panic-risk pressure."
-            ),
+            message="Several recent articles have strongly negative sentiment, which may increase panic-risk pressure.",
         ))
     elif news_count_1d > 0 and neg_ratio_1d >= 0.6:
         drivers.append(Driver(
@@ -499,10 +497,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             direction="negative",
             impact="high",
             value=round(neg_ratio_1d, 3),
-            message=(
-                "A high share of recent news coverage is negative, which can increase "
-                "emotional pressure on investors."
-            ),
+            message="A high share of recent news coverage is negative, which can increase emotional pressure on investors.",
         ))
     elif sentiment_min_1d <= -0.90:
         drivers.append(Driver(
@@ -516,11 +511,11 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
     elif sentiment_mean_1d <= -0.35:
         drivers.append(Driver(
             feature="sentiment_mean_1d",
-            label="Weak sentiment",
+            label="Weak news sentiment",
             direction="negative",
             impact="medium",
             value=round(sentiment_mean_1d, 3),
-            message="Average news sentiment is clearly negative.",
+            message="Average recent news sentiment is clearly negative.",
         ))
     elif news_count_7d > 0 and neg_ratio_3d >= 0.45:
         drivers.append(Driver(
@@ -532,6 +527,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             message="News tone has been leaning negative over the last few days.",
         ))
 
+    # 2. Negative coverage volume
     if neg_count_1d >= 5:
         drivers.append(Driver(
             feature="neg_count_1d",
@@ -539,12 +535,19 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             direction="negative",
             impact="medium",
             value=int(neg_count_1d),
-            message=(
-                "Several negative articles appeared recently, which may have influenced investor sentiment."
-            ),
+            message="Several negative articles appeared recently, which may have influenced investor sentiment.",
+        ))
+    elif neg_count_1d >= 2:
+        drivers.append(Driver(
+            feature="neg_count_1d",
+            label="Some recent negative coverage",
+            direction="negative",
+            impact="low",
+            value=int(neg_count_1d),
+            message="A few recent articles carried negative sentiment, but the negative coverage is not unusually heavy.",
         ))
 
-    # Avoid duplicate "news flow" and "news spike" cards.
+    # 3. General news activity — this was missing
     if news_count_1d >= 30 or news_spike_7d >= 2.0:
         value = int(news_count_1d) if news_count_1d >= 30 else round(news_spike_7d, 2)
         drivers.append(Driver(
@@ -553,24 +556,19 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             direction="negative",
             impact="medium",
             value=value,
-            message=(
-                "News coverage is significantly higher than normal, which can amplify emotional reactions."
-            ),
+            message="News coverage is significantly higher than normal, which can amplify emotional reactions.",
         ))
-
-    if earnings_news_count3d >= 5:
+    elif news_count_1d >= 5 or news_count_3d >= 10:
         drivers.append(Driver(
-            feature="earnings_news_count3d",
-            label="Earnings-related attention",
+            feature="news_activity",
+            label="Active news coverage",
             direction="mixed",
-            impact="medium",
-            value=int(earnings_news_count3d),
-            message=(
-                "There is elevated earnings-related coverage, which can increase "
-                "short-term volatility and investor attention."
-            ),
+            impact="low",
+            value=int(news_count_1d or news_count_3d),
+            message="The stock is receiving active news coverage, which may increase investor attention even if tone is not strongly negative.",
         ))
 
+    # 4. Event-specific signals
     if guidance_cut_news_count3d >= 1:
         drivers.append(Driver(
             feature="guidance_cut_news_count3d",
@@ -578,10 +576,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             direction="negative",
             impact="high",
             value=int(guidance_cut_news_count3d),
-            message=(
-                "Recent coverage contains guidance-cut language, which can increase "
-                "downside pressure."
-            ),
+            message="Recent coverage contains guidance-cut language, which can increase downside pressure.",
         ))
 
     if panic_news >= 1:
@@ -610,10 +605,7 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             direction="negative",
             impact="medium",
             value=int(negative_event_cluster),
-            message=(
-                "Recent news contains at least one negative event signal such as downgrade, "
-                "lawsuit, investigation, or guidance cut."
-            ),
+            message="Recent news contains at least one negative event signal such as downgrade, lawsuit, investigation, or guidance cut.",
         ))
 
     if event_pressure_score >= 8:
@@ -626,7 +618,16 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
             message="Event-related news pressure is elevated and may be contributing to downside risk.",
         ))
 
-    # Only add article severity if we did not already add a very similar severe-tone card.
+    if earnings_news_count3d >= 5:
+        drivers.append(Driver(
+            feature="earnings_news_count3d",
+            label="Earnings-related attention",
+            direction="mixed",
+            impact="medium",
+            value=int(earnings_news_count3d),
+            message="There is elevated earnings-related coverage, which can increase short-term volatility and investor attention.",
+        ))
+
     already_has_severe_tone = any(
         d.feature in {"very_neg_count_1d", "sentiment_min_1d", "sentiment_mean_1d"}
         for d in drivers
@@ -643,7 +644,6 @@ def generate_news_drivers(row: pd.Series) -> list[Driver]:
         ))
 
     return drivers
-
 
 def generate_supportive_signals(row: pd.Series) -> list[Driver]:
     drivers: list[Driver] = []
