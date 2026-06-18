@@ -1,7 +1,7 @@
 import math
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from sellsmart_ml.storage.client import get_supabase
 
@@ -60,7 +60,7 @@ def save_latest_prediction(prediction: dict) -> None:
     ).execute()
 
 
-def get_latest_prediction(ticker: str) -> dict | None:
+def get_latest_prediction(ticker: str) -> Optional[dict]:
     supabase = get_supabase()
 
     response = (
