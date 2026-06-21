@@ -915,6 +915,23 @@ def generate_insight(
             2,
         ),
 
+        "previous_close": round(
+            float(latest_row.get("previous_close", 0)),
+            2,
+        ),
+
+        "daily_change": round(
+            float(latest_row.get("daily_change", 0)),
+            2,
+        ),
+
+        "daily_change_percent": round(
+            float(latest_row.get("daily_change_percent", 0)),
+            2,
+        ),
+
+        "price_timestamp": str(latest_row.get("date")),
+
         "risk_score": risk_score,
         "probability_of_drop": round(probability, 4),
 

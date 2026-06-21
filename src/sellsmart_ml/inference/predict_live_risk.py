@@ -547,6 +547,17 @@ def build_live_features(
     )
 
     full_df = full_df.sort_values("date")
+
+    full_df["previous_close"] = full_df["close"].shift(1)
+
+    full_df["daily_change"] = (
+        full_df["close"] - full_df["previous_close"]
+    )
+
+    full_df["daily_change_percent"] = (
+        full_df["daily_change"] / full_df["previous_close"] * 100
+    )
+    
     latest = full_df.tail(1).copy()
 
     news_status = "unknown"
