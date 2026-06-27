@@ -1,9 +1,15 @@
 import math
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 from sellsmart_ml.storage.client import get_supabase
+
+
+# MVP cache policy:
+# Cron predictions are currently refreshed once per day, so 24h cache is a good default.
+# Override in Render/Supabase env if needed, e.g. PREDICTION_CACHE_TTL_HOURS=12.
+PREDICTION_CACHE_TTL_HOURS = int(os.getenv("PREDICTION_CACHE_TTL_HOURS", "24"))
 
 
 def clean_json_value(value: Any) -> Any:
@@ -27,7 +33,47 @@ def clean_json_value(value: Any) -> Any:
     return value
 
 
+def parse_datetime(value: Any) -> Optional[datetime]:
+    """Parse Supabase timestamp strings safely."""
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            # Supabase/Postgres may return either "+00:00" or "Z" timestamps.
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+def is_prediction_cache_fresh(generated_at: Any) -> bool:
+    """Return True only if cached prediction is recent enough for MVP usage."""
+    parsed = parse_datetime(generated_at)
+
+    if parsed is None:
+        return False
+
+    max_age = timedelta(hours=PREDICTION_CACHE_TTL_HOURS)
+    age = datetime.now(timezone.utc) - parsed
+
+    return timedelta(0) <= age <= max_age
+
+
 def save_latest_prediction(prediction: dict) -> None:
+    """Save or update the latest prediction for a ticker.
+
+    This is used both by the daily cron and by live user-requested predictions,
+    so user-added tickers become cached after the first slow request.
+    """
     supabase = get_supabase()
 
     ticker = prediction["ticker"].upper()
@@ -35,8 +81,10 @@ def save_latest_prediction(prediction: dict) -> None:
 
     prediction = clean_json_value({
         **prediction,
+        "ticker": ticker,
         "generated_at": generated_at,
         "cache_generated_at": generated_at,
+        "cache_status": "generated",
     })
 
     row = clean_json_value({
@@ -54,6 +102,8 @@ def save_latest_prediction(prediction: dict) -> None:
         "prediction_json": prediction,
     })
 
+    # Current MVP stores one latest prediction per ticker.
+    # If you add multiple horizons later, change DB constraint + on_conflict to "ticker,horizon".
     supabase.table("latest_predictions").upsert(
         row,
         on_conflict="ticker",
@@ -76,9 +126,16 @@ def get_latest_prediction(ticker: str) -> Optional[dict]:
         return None
 
     row = response.data[0]
-    prediction = row["prediction_json"]
+    generated_at = row.get("generated_at")
+
+    # Important: do not return stale cached predictions.
+    # Returning None tells the API endpoint to run a fresh live prediction.
+    if not is_prediction_cache_fresh(generated_at):
+        return None
+
+    prediction = dict(row["prediction_json"] or {})
     prediction["cache_status"] = "supabase"
-    prediction["cache_generated_at"] = row["generated_at"]
+    prediction["cache_generated_at"] = generated_at
 
     return prediction
 
@@ -99,9 +156,10 @@ def get_all_latest_predictions() -> list[dict]:
     results = []
 
     for row in rows:
-        prediction = row["prediction_json"]
+        prediction = dict(row["prediction_json"] or {})
         prediction["cache_status"] = "supabase"
-        prediction["cache_generated_at"] = row["generated_at"]
+        prediction["cache_generated_at"] = row.get("generated_at")
+        prediction["cache_is_fresh"] = is_prediction_cache_fresh(row.get("generated_at"))
 
         results.append(prediction)
 

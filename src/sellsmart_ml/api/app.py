@@ -5,7 +5,7 @@ from fastapi import FastAPI, Query, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from jwt import PyJWKClient
 
-from sellsmart_ml.storage.supabase_predictions import get_latest_prediction
+from sellsmart_ml.storage.supabase_predictions import get_latest_prediction, save_latest_prediction
 from sellsmart_ml.inference.predict_live_risk import predict_ticker_risk
 from sellsmart_ml.storage.supabase_predictions import get_all_latest_predictions
 from typing import Optional
@@ -81,7 +81,18 @@ def predict(
         if cached is not None:
             return cached
 
-    return predict_ticker_risk(ticker)
+    prediction = predict_ticker_risk(ticker)
+
+    # Cache live predictions so newly added user tickers become fast for
+    # the next user/request. Do not fail the prediction response if cache
+    # write fails for a transient Supabase issue.
+    try:
+        if prediction is not None:
+            save_latest_prediction(prediction)
+    except Exception as exc:
+        print(f"[cache] Failed to save latest prediction for {ticker}: {exc}")
+
+    return prediction
 
 
 @app.get("/predictions")
