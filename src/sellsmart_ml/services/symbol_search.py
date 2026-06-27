@@ -193,8 +193,26 @@ def _is_explicit_exchange_query(query: str) -> bool:
     return any(exchange in q.split() or f".{exchange}" in q or f":{exchange}" in q for exchange in known)
 
 
-def _looks_like_ticker_query(query: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9.:-]{1,10}", query.strip()))
+def _looks_like_symbol_format(query: str) -> bool:
+    """Return true when the text looks like a typed ticker/exchange code.
+
+    Important: words like "Apple" or "Tesla" are alphabetic and short, but
+    they are still company-name searches in the UI. The previous implementation
+    treated any 1-10 character word as a ticker, so "Apple" bypassed company
+    grouping and showed every cross-listing.
+    """
+    text = query.strip()
+    if not text or " " in text:
+        return False
+
+    # Explicit exchange/ticker notation should stay exchange-specific.
+    if any(mark in text for mark in (".", ":", "-")):
+        return True
+
+    # All-uppercase short inputs are likely tickers: AAPL, MSFT, VUSA.
+    # Lower/mixed case words like Apple, apple, Tesla are treated as names
+    # unless an exact symbol match is found in the returned provider results.
+    return bool(re.fullmatch(r"[A-Z0-9]{1,8}", text))
 
 
 def _score_item(item: dict[str, Any], query: str) -> int:
@@ -240,7 +258,7 @@ def _score_item(item: dict[str, Any], query: str) -> int:
         score -= 90
 
     # Prefer cleaner US primary listings for broad name searches.
-    if not _looks_like_ticker_query(query) and exchange in SECONDARY_LISTING_EXCHANGES:
+    if not _looks_like_symbol_format(query) and exchange in SECONDARY_LISTING_EXCHANGES:
         score -= 35
 
     return score
@@ -257,7 +275,7 @@ def _rank_and_filter(items: list[dict[str, Any]], query: str, limit: int) -> lis
         return []
 
     q_norm = _norm(query)
-    ticker_query = _looks_like_ticker_query(query)
+    symbol_format_query = _looks_like_symbol_format(query)
     explicit_exchange = _is_explicit_exchange_query(query)
 
     # Remove exact technical duplicates first, regardless of provider.
@@ -301,10 +319,20 @@ def _rank_and_filter(items: list[dict[str, Any]], query: str, limit: int) -> lis
 
     strong.sort(key=lambda pair: pair[1], reverse=True)
 
-    # Collapse cross-listings for broad company-name searches. For "Apple", show
-    # Apple Inc. NASDAQ first, not the same Apple on BMV/BVC/LSE/etc. For "AAPL"
-    # or "AAPL BMV", keep exchange-specific matches available.
-    if not explicit_exchange and not ticker_query:
+    # Collapse cross-listings for broad company-name searches.
+    #
+    # The previous bug: "Apple" matched the old ticker heuristic because it is
+    # a short alphabetic word, so the code skipped this grouping and returned
+    # Apple on NASDAQ, LSE, XETRA, TSX, etc. For a normal company-name search,
+    # users should see the primary listing only.
+    #
+    # Keep exchange-specific variants only when the user explicitly types an
+    # exchange/ticker notation, or when the query exactly equals a returned
+    # ticker such as AAPL/MSFT/TSLA.
+    has_exact_symbol_match = any(_norm(item.get("symbol")) == q_norm for item, _score in strong)
+    should_collapse_by_company = not explicit_exchange and not (symbol_format_query and has_exact_symbol_match)
+
+    if should_collapse_by_company:
         best_by_company: dict[str, tuple[dict[str, Any], int]] = {}
         for item, score in strong:
             company_key = _clean_company_name(item.get("name"))
