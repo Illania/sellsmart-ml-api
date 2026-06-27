@@ -187,37 +187,57 @@ def _dedupe_provider_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _is_explicit_exchange_query(query: str) -> bool:
-    q = query.upper()
-    known = set(PRIMARY_EXCHANGES) | SECONDARY_LISTING_EXCHANGES | set(EXCHANGE_ALIASES)
-    return any(exchange in q.split() or f".{exchange}" in q or f":{exchange}" in q for exchange in known)
+def _extract_exchange_query(query: str) -> tuple[str, str | None]:
+    """Return (base_query, requested_exchange) for inputs like AAPL LSE or AAPL:XLON.
 
-
-def _looks_like_symbol_format(query: str) -> bool:
-    """Return true when the text looks like a typed ticker/exchange code.
-
-    Important: words like "Apple" or "Tesla" are alphabetic and short, but
-    they are still company-name searches in the UI. The previous implementation
-    treated any 1-10 character word as a ticker, so "Apple" bypassed company
-    grouping and showed every cross-listing.
+    Providers usually do not understand human inputs such as "AAPL LSE".
+    They expect the base ticker/company query, while our ranking layer should
+    then prefer/filter the requested exchange.
     """
-    text = query.strip()
-    if not text or " " in text:
-        return False
+    q = query.strip()
+    if not q:
+        return "", None
 
-    # Explicit exchange/ticker notation should stay exchange-specific.
-    if any(mark in text for mark in (".", ":", "-")):
-        return True
+    known = sorted(
+        set(PRIMARY_EXCHANGES) | SECONDARY_LISTING_EXCHANGES | set(EXCHANGE_ALIASES),
+        key=len,
+        reverse=True,
+    )
 
-    # All-uppercase short inputs are likely tickers: AAPL, MSFT, VUSA.
-    # Lower/mixed case words like Apple, apple, Tesla are treated as names
-    # unless an exact symbol match is found in the returned provider results.
-    return bool(re.fullmatch(r"[A-Z0-9]{1,8}", text))
+    # AAPL:LSE, AAPL.XLON, AAPL-LSE
+    compact_match = re.fullmatch(r"(.+?)[\s:./-]+([A-Za-z]{2,10})", q)
+    if compact_match:
+        base = compact_match.group(1).strip()
+        exchange = _canonical_exchange(compact_match.group(2))
+        if exchange in {_canonical_exchange(x) for x in known}:
+            return base, exchange
+
+    words = q.split()
+    if len(words) >= 2:
+        last = _canonical_exchange(words[-1])
+        if last in {_canonical_exchange(x) for x in known}:
+            return " ".join(words[:-1]).strip(), last
+
+    return q, None
 
 
-def _score_item(item: dict[str, Any], query: str) -> int:
-    q_norm = _norm(query)
-    q_words = _norm_words(query)
+def _is_explicit_exchange_query(query: str) -> bool:
+    return _extract_exchange_query(query)[1] is not None
+
+
+def _looks_like_ticker_query(query: str) -> bool:
+    base_query, requested_exchange = _extract_exchange_query(query)
+    if requested_exchange:
+        query = base_query
+    return bool(re.fullmatch(r"[A-Za-z0-9.:-]{1,10}", query.strip()))
+
+
+def _score_item(item: dict[str, Any], query: str, requested_exchange: str | None = None) -> int:
+    base_query, parsed_exchange = _extract_exchange_query(query)
+    requested_exchange = requested_exchange or parsed_exchange
+    effective_query = base_query or query
+    q_norm = _norm(effective_query)
+    q_words = _norm_words(effective_query)
     symbol = (item.get("symbol") or "").upper()
     symbol_norm = _norm(symbol)
     name = item.get("name") or ""
@@ -258,7 +278,13 @@ def _score_item(item: dict[str, Any], query: str) -> int:
         score -= 90
 
     # Prefer cleaner US primary listings for broad name searches.
-    if not _looks_like_symbol_format(query) and exchange in SECONDARY_LISTING_EXCHANGES:
+    if requested_exchange:
+        if exchange == requested_exchange:
+            score += 180
+        else:
+            score -= 120
+
+    if not _looks_like_ticker_query(query) and exchange in SECONDARY_LISTING_EXCHANGES:
         score -= 35
 
     return score
@@ -274,9 +300,11 @@ def _rank_and_filter(items: list[dict[str, Any]], query: str, limit: int) -> lis
     if not items:
         return []
 
-    q_norm = _norm(query)
-    symbol_format_query = _looks_like_symbol_format(query)
-    explicit_exchange = _is_explicit_exchange_query(query)
+    base_query, requested_exchange = _extract_exchange_query(query)
+    effective_query = base_query or query
+    q_norm = _norm(effective_query)
+    ticker_query = _looks_like_ticker_query(query)
+    explicit_exchange = requested_exchange is not None
 
     # Remove exact technical duplicates first, regardless of provider.
     exact_seen: set[tuple[str, str, str]] = set()
@@ -291,7 +319,17 @@ def _rank_and_filter(items: list[dict[str, Any]], query: str, limit: int) -> lis
         exact_seen.add(key)
         unique.append(item)
 
-    scored = [(item, _score_item(item, query)) for item in unique]
+    scored = [(item, _score_item(item, query, requested_exchange=requested_exchange)) for item in unique]
+
+    # If the query is exchange-specific, e.g. "AAPL LSE", providers may return
+    # the foreign listing under its local ticker (for Apple on LSE this can be
+    # OR2V, not AAPL). Infer the company from exact base-ticker matches, then
+    # keep requested-exchange rows for the same company.
+    exact_base_company_keys = {
+        _clean_company_name(item.get("name"))
+        for item in unique
+        if _norm(item.get("symbol")) == q_norm
+    }
 
     # Discard weak matches that only appear because provider search is broad.
     # Keep exact ticker matches even when their name does not contain the query.
@@ -299,12 +337,19 @@ def _rank_and_filter(items: list[dict[str, Any]], query: str, limit: int) -> lis
     for item, score in scored:
         symbol_norm = _norm(item.get("symbol"))
         name_norm = _norm(item.get("name"))
+        exchange = _canonical_exchange(item.get("exchange")) or ""
+        company_key = _clean_company_name(item.get("name"))
         instrument_type = (item.get("instrument_type") or "").lower()
 
         direct_match = symbol_norm.startswith(q_norm) or q_norm in name_norm
         exact_ticker = symbol_norm == q_norm
+        requested_company_exchange_match = (
+            requested_exchange is not None
+            and exchange == requested_exchange
+            and company_key in exact_base_company_keys
+        )
 
-        if not direct_match and not exact_ticker:
+        if not direct_match and not exact_ticker and not requested_company_exchange_match:
             continue
 
         # For ordinary searches, avoid mutual funds unless the user searched the
@@ -319,20 +364,10 @@ def _rank_and_filter(items: list[dict[str, Any]], query: str, limit: int) -> lis
 
     strong.sort(key=lambda pair: pair[1], reverse=True)
 
-    # Collapse cross-listings for broad company-name searches.
-    #
-    # The previous bug: "Apple" matched the old ticker heuristic because it is
-    # a short alphabetic word, so the code skipped this grouping and returned
-    # Apple on NASDAQ, LSE, XETRA, TSX, etc. For a normal company-name search,
-    # users should see the primary listing only.
-    #
-    # Keep exchange-specific variants only when the user explicitly types an
-    # exchange/ticker notation, or when the query exactly equals a returned
-    # ticker such as AAPL/MSFT/TSLA.
-    has_exact_symbol_match = any(_norm(item.get("symbol")) == q_norm for item, _score in strong)
-    should_collapse_by_company = not explicit_exchange and not (symbol_format_query and has_exact_symbol_match)
-
-    if should_collapse_by_company:
+    # Collapse cross-listings for broad company-name searches. For "Apple", show
+    # Apple Inc. NASDAQ first, not the same Apple on BMV/BVC/LSE/etc. For "AAPL"
+    # or "AAPL BMV", keep exchange-specific matches available.
+    if not explicit_exchange and not ticker_query:
         best_by_company: dict[str, tuple[dict[str, Any], int]] = {}
         for item, score in strong:
             company_key = _clean_company_name(item.get("name"))
@@ -405,16 +440,26 @@ def search_symbols(query: str, limit: int = 10) -> list[dict[str, Any]]:
 
     # Pull a few more than requested so ranking can choose the best candidates.
     provider_limit = max(limit * 3, 20)
-    cached = search_cached_symbols(q, limit=provider_limit)
+    base_query, requested_exchange = _extract_exchange_query(q)
+    provider_queries = [q]
+    if requested_exchange and base_query and base_query != q:
+        # Providers generally do not understand inputs like "AAPL LSE" or
+        # "AAPL:XLON". Query the base ticker as well, then rank/filter locally.
+        provider_queries.append(base_query)
+
+    cached: list[dict[str, Any]] = []
+    for provider_query in provider_queries:
+        cached.extend(search_cached_symbols(provider_query, limit=provider_limit))
 
     provider_items: list[dict[str, Any]] = []
     provider_errors: list[str] = []
 
-    for provider_search in (_search_twelve_data, _search_fmp):
-        try:
-            provider_items.extend(provider_search(q, limit=provider_limit))
-        except Exception as exc:
-            provider_errors.append(str(exc))
+    for provider_query in provider_queries:
+        for provider_search in (_search_twelve_data, _search_fmp):
+            try:
+                provider_items.extend(provider_search(provider_query, limit=provider_limit))
+            except Exception as exc:
+                provider_errors.append(str(exc))
 
     provider_items = _dedupe_provider_items(provider_items)
 
