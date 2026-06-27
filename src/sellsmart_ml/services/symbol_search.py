@@ -11,35 +11,65 @@ from sellsmart_ml.storage.supabase_symbols import cache_symbol_results, search_c
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
 FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 
-MAJOR_EXCHANGE_SCORE = {
-    "NASDAQ": 80,
-    "NYSE": 75,
-    "AMEX": 65,
-    "NYSE ARCA": 60,
-    "ARCA": 60,
-    "LSE": 45,
-    "TSX": 40,
-    "TSE": 40,
-    "XETR": 35,
-    "FWB": 30,
-    "HKEX": 30,
-    "ASX": 30,
+PRIMARY_EXCHANGES = {
+    "NASDAQ": 100,
+    "NYSE": 95,
+    "AMEX": 80,
+    "NYSEARCA": 78,
+    "LSE": 75,
+    "TSX": 72,
+    "TSE": 70,
+    "JPX": 70,
+    "XETR": 68,
+    "XETRA": 68,
+    "FWB": 65,
+    "HKEX": 65,
+    "HKSE": 65,
+    "ASX": 63,
+    "SSE": 60,
+    "SZSE": 60,
+    "SGX": 58,
+    "EURONEXT": 56,
 }
 
-US_LOGO_EXCHANGES = {"NASDAQ", "NYSE", "AMEX", "NYSE ARCA", "ARCA"}
+# These exchanges are valid, but they are usually secondary cross-listings for
+# large US names. Keep them searchable, but do not show them before the primary
+# listing for broad company-name searches like "apple".
+SECONDARY_LISTING_EXCHANGES = {
+    "BMV", "BVC", "TSX", "LSE", "XETR", "XETRA", "FWB", "BER", "MUN", "STU", "DUS",
+}
 
-LEVERAGED_OR_DERIVATIVE_TERMS = (
-    " 2X ",
-    " 3X ",
-    " 4X ",
-    "SHORT",
-    "INVERSE",
-    "LEVERAGED",
-    "BULL",
-    "BEAR",
-    "ULTRA",
-    "DAILY",
-)
+FUNDISH_TYPES = {
+    "fund",
+    "mutual fund",
+    "unit trust",
+    "closed-end fund",
+}
+
+GOOD_TYPES = {
+    "stock",
+    "common stock",
+    "equity",
+    "etf",
+    "exchange traded fund",
+}
+
+EXCHANGE_ALIASES = {
+    "XNGS": "NASDAQ",
+    "XNAS": "NASDAQ",
+    "XNYS": "NYSE",
+    "ARCX": "NYSEARCA",
+    "XLON": "LSE",
+    "XTSE": "TSX",
+    "XTKS": "TSE",
+    "XJPX": "JPX",
+    "XETR": "XETR",
+    "XFRA": "FWB",
+    "XHKG": "HKEX",
+    "XASX": "ASX",
+    "XSES": "SGX",
+    "XMEX": "BMV",
+}
 
 
 def _clean(value: Any) -> str | None:
@@ -49,30 +79,45 @@ def _clean(value: Any) -> str | None:
     return text or None
 
 
-def _normalize(value: str | None) -> str:
-    return "".join(ch for ch in (value or "").upper().strip() if ch.isalnum())
+def _norm(value: str | None) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", (value or "").upper())
 
 
-def _word_contains(text: str, query: str) -> bool:
-    return query in text.lower()
+def _norm_words(value: str | None) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9]+", " ", (value or "").upper())).strip()
 
 
-def _word_starts(text: str, query: str) -> bool:
-    q = re.escape(query.lower())
-    return bool(re.search(rf"(^|[^a-z0-9]){q}", text.lower()))
+def _clean_company_name(value: str | None) -> str:
+    """Normalize company names for grouping duplicate/cross-listed results."""
+    words = _norm_words(value)
+    suffixes = {
+        "INC", "INCORPORATED", "CORP", "CORPORATION", "PLC", "LTD", "LIMITED",
+        "SA", "SE", "NV", "AG", "ADR", "ADS", "DR", "DEPOSITARY", "RECEIPT",
+    }
+    kept = [word for word in words.split() if word not in suffixes]
+    return " ".join(kept) or words
+
+
+def _canonical_exchange(value: str | None) -> str | None:
+    raw = _clean(value)
+    if not raw:
+        return None
+    upper = raw.upper()
+    return EXCHANGE_ALIASES.get(upper, upper)
 
 
 def _logo_url(symbol: str, exchange: str | None = None) -> str | None:
-    """Return a logo URL only when it is likely to be correct.
+    """Return FMP logo URL only for simple US-style tickers.
 
-    FMP logo URLs are ticker-based. For foreign listings like Apple on XETR
-    with symbol APC, using APC.png can show the wrong company logo. For those
-    cases we return None so the frontend can show an initials fallback.
+    FMP image URLs are often wrong for secondary/global listings. The frontend
+    already has an initials fallback, so it is better to return no logo than a
+    misleading/broken one.
     """
     clean_symbol = symbol.strip().upper()
-    clean_exchange = (exchange or "").strip().upper()
+    if not clean_symbol or not re.fullmatch(r"[A-Z]{1,5}", clean_symbol):
+        return None
 
-    if not clean_symbol or clean_exchange not in US_LOGO_EXCHANGES:
+    if exchange and _canonical_exchange(exchange) not in {"NASDAQ", "NYSE", "AMEX", "NYSEARCA"}:
         return None
 
     return f"https://images.financialmodelingprep.com/symbol/{clean_symbol}.png"
@@ -85,7 +130,7 @@ def _map_twelve_data_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if not symbol or not name:
         return None
 
-    exchange = _clean(item.get("exchange")) or _clean(item.get("mic_code"))
+    exchange = _canonical_exchange(item.get("exchange") or item.get("mic_code"))
     mic_code = _clean(item.get("mic_code"))
     provider_symbol = symbol if not mic_code else f"{symbol}:{mic_code}"
 
@@ -93,7 +138,7 @@ def _map_twelve_data_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "symbol": symbol.upper(),
         "name": name,
         "exchange": exchange,
-        "exchange_name": _clean(item.get("exchange")),
+        "exchange_name": exchange,
         "country": _clean(item.get("country")),
         "currency": _clean(item.get("currency")),
         "instrument_type": (_clean(item.get("instrument_type")) or "stock").lower(),
@@ -110,13 +155,13 @@ def _map_fmp_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if not symbol or not name:
         return None
 
-    exchange = _clean(item.get("exchangeShortName")) or _clean(item.get("exchange"))
+    exchange = _canonical_exchange(item.get("exchangeShortName") or item.get("exchange"))
 
     return {
         "symbol": symbol.upper(),
         "name": name,
         "exchange": exchange,
-        "exchange_name": _clean(item.get("exchange")),
+        "exchange_name": _clean(item.get("exchange")) or exchange,
         "country": None,
         "currency": _clean(item.get("currency")),
         "instrument_type": (_clean(item.get("type")) or "stock").lower(),
@@ -126,12 +171,14 @@ def _map_fmp_item(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dedupe_provider_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
     result: list[dict[str, Any]] = []
 
     for item in items:
-        key = (item.get("provider") or "", item.get("provider_symbol") or item.get("symbol") or "")
+        provider = item.get("provider") or ""
+        provider_symbol = item.get("provider_symbol") or item.get("symbol") or ""
+        key = (provider, provider_symbol)
         if key in seen:
             continue
         seen.add(key)
@@ -140,87 +187,143 @@ def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _item_score(item: dict[str, Any], query: str) -> int | None:
-    """Score a result for autocomplete. Return None to hide weak matches.
+def _is_explicit_exchange_query(query: str) -> bool:
+    q = query.upper()
+    known = set(PRIMARY_EXCHANGES) | SECONDARY_LISTING_EXCHANGES | set(EXCHANGE_ALIASES)
+    return any(exchange in q.split() or f".{exchange}" in q or f":{exchange}" in q for exchange in known)
 
-    Provider search APIs can return broad thematic ETF results for company-name
-    queries. Autocomplete should feel strict: it should show symbols/names that
-    actually match what the user typed, then rank primary listings first.
-    """
-    q_text = query.strip().lower()
-    q_norm = _normalize(query)
+
+def _looks_like_ticker_query(query: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9.:-]{1,10}", query.strip()))
+
+
+def _score_item(item: dict[str, Any], query: str) -> int:
+    q_norm = _norm(query)
+    q_words = _norm_words(query)
     symbol = (item.get("symbol") or "").upper()
-    symbol_norm = _normalize(symbol)
+    symbol_norm = _norm(symbol)
     name = item.get("name") or ""
-    name_lower = name.lower()
-    exchange = (item.get("exchange") or "").upper()
+    name_norm = _norm(name)
+    name_words = _norm_words(name)
+    exchange = _canonical_exchange(item.get("exchange")) or ""
     instrument_type = (item.get("instrument_type") or "").lower()
 
-    if not q_text or not q_norm:
-        return None
-
-    score: int | None = None
+    score = 0
 
     if symbol_norm == q_norm:
-        score = 1000
+        score += 140
     elif symbol_norm.startswith(q_norm):
-        score = 900
-    elif q_norm in symbol_norm and len(q_norm) >= 2:
-        score = 720
-    elif name_lower == q_text:
-        score = 860
-    elif name_lower.startswith(q_text):
-        score = 840
-    elif _word_starts(name, q_text):
-        score = 780
-    elif _word_contains(name, q_text):
-        score = 680
+        score += 85
 
-    # Hide broad provider results that do not visibly match symbol or company
-    # name. This removes rows like GraniteShares appearing for "apple".
-    if score is None:
-        return None
+    if name_words == q_words:
+        score += 130
+    elif name_words.startswith(q_words + " ") or name_words.startswith(q_words):
+        score += 110
+    elif q_norm and q_norm in name_norm:
+        score += 55
 
-    score += MAJOR_EXCHANGE_SCORE.get(exchange, 0)
+    score += PRIMARY_EXCHANGES.get(exchange, 0)
 
-    if "common stock" in instrument_type or instrument_type in {"stock", "common"}:
+    if instrument_type in {"common stock", "stock", "equity"}:
         score += 35
-    elif "etf" in instrument_type:
+    elif instrument_type in {"etf", "exchange traded fund"}:
+        score += 10
+    elif instrument_type in FUNDISH_TYPES:
+        score -= 90
+    elif "fund" in instrument_type:
         score -= 60
-    elif "depositary" in instrument_type or "receipt" in instrument_type:
-        score -= 25
 
-    name_padded = f" {name.upper()} "
-    if any(term in name_padded for term in LEVERAGED_OR_DERIVATIVE_TERMS):
-        score -= 200
+    upper_name = name.upper()
+    if " FUND" in upper_name or upper_name.endswith("FUND"):
+        score -= 80
+    if "SHORT" in upper_name or "LEVERAGED" in upper_name or "3X" in upper_name:
+        score -= 90
 
-    # For company-name searches, keep ETFs only when the ETF name itself
-    # visibly matches the query or the user typed the ETF ticker.
-    if "etf" in instrument_type and not (symbol_norm.startswith(q_norm) or _word_contains(name, q_text)):
-        return None
+    # Prefer cleaner US primary listings for broad name searches.
+    if not _looks_like_ticker_query(query) and exchange in SECONDARY_LISTING_EXCHANGES:
+        score -= 35
 
     return score
 
 
 def _rank_and_filter(items: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
-    scored: list[tuple[int, dict[str, Any]]] = []
+    """Rank search results for normal retail-investor expectations.
 
-    for item in _dedupe(items):
-        score = _item_score(item, query)
-        if score is None:
+    For broad company-name searches, show one best listing per company by
+    default, usually the primary listing. Secondary listings remain discoverable
+    when the user searches by ticker/exchange explicitly.
+    """
+    if not items:
+        return []
+
+    q_norm = _norm(query)
+    ticker_query = _looks_like_ticker_query(query)
+    explicit_exchange = _is_explicit_exchange_query(query)
+
+    # Remove exact technical duplicates first, regardless of provider.
+    exact_seen: set[tuple[str, str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for item in items:
+        symbol = _norm(item.get("symbol"))
+        exchange = _canonical_exchange(item.get("exchange")) or ""
+        name_key = _clean_company_name(item.get("name"))
+        key = (symbol, exchange, name_key)
+        if key in exact_seen:
             continue
-        scored.append((score, item))
+        exact_seen.add(key)
+        unique.append(item)
 
-    scored.sort(
-        key=lambda pair: (
-            pair[0],
-            pair[1].get("symbol") or "",
-            pair[1].get("exchange") or "",
-        ),
-        reverse=True,
-    )
+    scored = [(item, _score_item(item, query)) for item in unique]
 
-    return [item for _, item in scored[:limit]]
+    # Discard weak matches that only appear because provider search is broad.
+    # Keep exact ticker matches even when their name does not contain the query.
+    strong: list[tuple[dict[str, Any], int]] = []
+    for item, score in scored:
+        symbol_norm = _norm(item.get("symbol"))
+        name_norm = _norm(item.get("name"))
+        instrument_type = (item.get("instrument_type") or "").lower()
+
+        direct_match = symbol_norm.startswith(q_norm) or q_norm in name_norm
+        exact_ticker = symbol_norm == q_norm
+
+        if not direct_match and not exact_ticker:
+            continue
+
+        # For ordinary searches, avoid mutual funds unless the user searched the
+        # exact fund ticker/name. This stops "Appleseed Fund" outranking Apple.
+        if instrument_type in FUNDISH_TYPES or "fund" in instrument_type:
+            if not exact_ticker and not name_norm.startswith(q_norm):
+                continue
+
+        if score < 40:
+            continue
+        strong.append((item, score))
+
+    strong.sort(key=lambda pair: pair[1], reverse=True)
+
+    # Collapse cross-listings for broad company-name searches. For "Apple", show
+    # Apple Inc. NASDAQ first, not the same Apple on BMV/BVC/LSE/etc. For "AAPL"
+    # or "AAPL BMV", keep exchange-specific matches available.
+    if not explicit_exchange and not ticker_query:
+        best_by_company: dict[str, tuple[dict[str, Any], int]] = {}
+        for item, score in strong:
+            company_key = _clean_company_name(item.get("name"))
+            current = best_by_company.get(company_key)
+            if current is None or score > current[1]:
+                best_by_company[company_key] = (item, score)
+        strong = sorted(best_by_company.values(), key=lambda pair: pair[1], reverse=True)
+
+    # If the user typed a ticker like AAPL, keep only one result per exchange and
+    # prefer the best-ranked representation from providers/cache.
+    best_by_symbol_exchange: dict[tuple[str, str], tuple[dict[str, Any], int]] = {}
+    for item, score in strong:
+        key = (_norm(item.get("symbol")), _canonical_exchange(item.get("exchange")) or "")
+        current = best_by_symbol_exchange.get(key)
+        if current is None or score > current[1]:
+            best_by_symbol_exchange[key] = (item, score)
+
+    ranked = sorted(best_by_symbol_exchange.values(), key=lambda pair: pair[1], reverse=True)
+    return [item for item, _score in ranked[:limit]]
 
 
 def _search_twelve_data(query: str, limit: int) -> list[dict[str, Any]]:
@@ -239,7 +342,7 @@ def _search_twelve_data(query: str, limit: int) -> list[dict[str, Any]]:
     raw_items = payload.get("data") or []
 
     mapped = [_map_twelve_data_item(item) for item in raw_items]
-    return [item for item in mapped if item is not None]
+    return [item for item in mapped if item is not None][: max(limit, 20)]
 
 
 def _search_fmp(query: str, limit: int) -> list[dict[str, Any]]:
@@ -256,43 +359,47 @@ def _search_fmp(query: str, limit: int) -> list[dict[str, Any]]:
 
     raw_items = response.json() or []
     mapped = [_map_fmp_item(item) for item in raw_items]
-    return [item for item in mapped if item is not None]
+    return [item for item in mapped if item is not None][: max(limit, 20)]
 
 
 def search_symbols(query: str, limit: int = 10) -> list[dict[str, Any]]:
-    """Search global stocks/ETFs by ticker or company name."""
+    """Search global stocks/ETFs by ticker or company name.
+
+    Returns ranked, normalized suggestions. For broad company-name searches,
+    results are collapsed toward the most likely primary listing. For exact
+    ticker/exchange searches, secondary listings remain visible.
+    """
     q = query.strip()
     if len(q) < 1:
         return []
 
     limit = max(1, min(limit, 25))
 
-    cached: list[dict[str, Any]] = []
+    # Pull a few more than requested so ranking can choose the best candidates.
+    provider_limit = max(limit * 3, 20)
+    cached = search_cached_symbols(q, limit=provider_limit)
+
     provider_items: list[dict[str, Any]] = []
     provider_errors: list[str] = []
 
-    try:
-        cached = search_cached_symbols(q, limit=max(limit, 20))
-    except Exception as exc:
-        provider_errors.append(f"cache read failed: {exc}")
-
     for provider_search in (_search_twelve_data, _search_fmp):
         try:
-            provider_items.extend(provider_search(q, limit=max(limit, 20)))
+            provider_items.extend(provider_search(q, limit=provider_limit))
         except Exception as exc:
             provider_errors.append(str(exc))
 
-    ranked_provider_items = _rank_and_filter(provider_items, q, limit=max(limit, 20))
+    provider_items = _dedupe_provider_items(provider_items)
 
     try:
-        cache_symbol_results(ranked_provider_items)
+        cache_symbol_results(provider_items)
     except Exception as exc:
         provider_errors.append(f"cache write failed: {exc}")
 
-    combined = _rank_and_filter([*ranked_provider_items, *cached], q, limit=limit)
+    combined = _dedupe_provider_items([*provider_items, *cached])
+    ranked = _rank_and_filter(combined, q, limit=limit)
 
     # Avoid leaking provider exception details to the UI; log for Render.
     if provider_errors:
         print(f"[symbol_search] provider/cache errors for '{q}': {provider_errors}")
 
-    return combined
+    return ranked
