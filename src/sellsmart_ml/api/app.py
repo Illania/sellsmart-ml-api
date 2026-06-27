@@ -1,13 +1,20 @@
 import os
 import jwt
 
-from fastapi import FastAPI, Query, Header, HTTPException, Depends
+from fastapi import FastAPI, Query, Header, HTTPException, Depends, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from jwt import PyJWKClient
 
 from sellsmart_ml.storage.supabase_predictions import get_latest_prediction, save_latest_prediction
 from sellsmart_ml.inference.predict_live_risk import predict_ticker_risk
 from sellsmart_ml.storage.supabase_predictions import get_all_latest_predictions
+from sellsmart_ml.storage.supabase_prediction_jobs import (
+    create_prediction_job,
+    get_active_prediction_job,
+    get_prediction_job,
+    serialize_prediction_job,
+)
+from sellsmart_ml.jobs.prediction_worker import process_prediction_job
 from typing import Optional
 
 from sellsmart_ml.services.symbol_search import search_symbols
@@ -72,16 +79,33 @@ def health():
 
 @app.get("/predict")
 def predict(
+    background_tasks: BackgroundTasks,
+    response: Response,
     ticker: str = Query(..., min_length=1),
     live: bool = Query(False),
+    queued: bool = Query(False),
     user=Depends(require_user),
 ):
-    ticker = ticker.upper()
+    ticker = ticker.upper().strip()
 
     if not live:
         cached = get_latest_prediction(ticker)
         if cached is not None:
             return cached
+
+    # Backwards compatible default: existing frontend can keep calling /predict
+    # and receive a prediction object synchronously. New UI can pass queued=true
+    # to keep the API responsive while a background job generates the prediction.
+    if queued:
+        user_id = user.get("sub") if isinstance(user, dict) else None
+        job = get_active_prediction_job(ticker=ticker, user_id=user_id)
+
+        if job is None:
+            job = create_prediction_job(ticker=ticker, user_id=user_id, live=live)
+            background_tasks.add_task(process_prediction_job, job["id"])
+
+        response.status_code = 202
+        return serialize_prediction_job(job)
 
     prediction = predict_ticker_risk(ticker)
 
@@ -95,6 +119,59 @@ def predict(
         print(f"[cache] Failed to save latest prediction for {ticker}: {exc}")
 
     return prediction
+
+
+@app.post("/prediction-jobs")
+def enqueue_prediction_job(
+    background_tasks: BackgroundTasks,
+    response: Response,
+    ticker: str = Query(..., min_length=1),
+    live: bool = Query(False),
+    user=Depends(require_user),
+):
+    ticker = ticker.upper().strip()
+
+    if not live:
+        cached = get_latest_prediction(ticker)
+        if cached is not None:
+            return {
+                "job_id": None,
+                "ticker": ticker,
+                "status": "completed",
+                "progress": 100,
+                "message": "Prediction loaded from fresh cache.",
+                "prediction": cached,
+                "error_message": None,
+            }
+
+    user_id = user.get("sub") if isinstance(user, dict) else None
+    job = get_active_prediction_job(ticker=ticker, user_id=user_id)
+
+    if job is None:
+        job = create_prediction_job(ticker=ticker, user_id=user_id, live=live)
+        background_tasks.add_task(process_prediction_job, job["id"])
+
+    response.status_code = 202
+    return serialize_prediction_job(job)
+
+
+@app.get("/prediction-jobs/{job_id}")
+def prediction_job_status(
+    job_id: str,
+    user=Depends(require_user),
+):
+    job = get_prediction_job(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Prediction job not found")
+
+    user_id = user.get("sub") if isinstance(user, dict) else None
+    job_user_id = job.get("user_id")
+
+    if job_user_id and user_id and str(job_user_id) != str(user_id):
+        raise HTTPException(status_code=403, detail="Not allowed to view this prediction job")
+
+    return serialize_prediction_job(job)
 
 
 @app.get("/predictions")
