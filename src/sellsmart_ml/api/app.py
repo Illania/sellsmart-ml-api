@@ -10,6 +10,8 @@ from sellsmart_ml.inference.predict_live_risk import predict_ticker_risk
 from sellsmart_ml.storage.supabase_predictions import get_all_latest_predictions
 from typing import Optional
 
+from sellsmart_ml.services.symbol_search import search_symbols
+
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
@@ -99,4 +101,14 @@ def predict(
 def predictions(user=Depends(require_user)):
     return {
         "items": get_all_latest_predictions()
+    }
+
+@app.get("/symbols/search")
+def symbols_search(
+    q: str = Query(..., min_length=1, max_length=80),
+    limit: int = Query(10, ge=1, le=25),
+    user=Depends(require_user),
+):
+    return {
+        "items": search_symbols(q, limit=limit)
     }
