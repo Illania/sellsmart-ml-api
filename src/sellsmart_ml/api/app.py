@@ -84,11 +84,16 @@ def predict(
     ticker: str = Query(..., min_length=1),
     live: bool = Query(False),
     queued: bool = Query(False),
+    force_refresh: bool = Query(False),
     user=Depends(require_user),
 ):
     ticker = ticker.upper().strip()
 
-    if not live:
+    # Always prefer a fresh Supabase prediction unless the caller explicitly asks
+    # to regenerate. This is important for portfolio/watchlist loading: even if an
+    # older frontend still sends live=true, fresh cached rows should be returned
+    # immediately instead of queuing expensive FinBERT/yfinance work for every card.
+    if not force_refresh:
         cached = get_latest_prediction(ticker)
         if cached is not None:
             return cached
@@ -101,7 +106,11 @@ def predict(
         job = get_active_prediction_job(ticker=ticker, user_id=user_id)
 
         if job is None:
-            job = create_prediction_job(ticker=ticker, user_id=user_id, live=live)
+            job = create_prediction_job(
+                ticker=ticker,
+                user_id=user_id,
+                live=force_refresh,
+            )
             background_tasks.add_task(process_prediction_job, job["id"])
 
         response.status_code = 202
@@ -127,11 +136,15 @@ def enqueue_prediction_job(
     response: Response,
     ticker: str = Query(..., min_length=1),
     live: bool = Query(False),
+    force_refresh: bool = Query(False),
     user=Depends(require_user),
 ):
     ticker = ticker.upper().strip()
 
-    if not live:
+    # Cache-first behavior must also apply to the async endpoint. The `live`
+    # parameter is kept only for backwards compatibility with older UI builds.
+    # Use `force_refresh=true` when you really want to bypass the cache.
+    if not force_refresh:
         cached = get_latest_prediction(ticker)
         if cached is not None:
             return {
@@ -148,7 +161,11 @@ def enqueue_prediction_job(
     job = get_active_prediction_job(ticker=ticker, user_id=user_id)
 
     if job is None:
-        job = create_prediction_job(ticker=ticker, user_id=user_id, live=live)
+        job = create_prediction_job(
+            ticker=ticker,
+            user_id=user_id,
+            live=force_refresh,
+        )
         background_tasks.add_task(process_prediction_job, job["id"])
 
     response.status_code = 202
