@@ -110,7 +110,7 @@ def save_latest_prediction(prediction: dict) -> None:
     ).execute()
 
 
-def get_latest_prediction(ticker: str) -> Optional[dict]:
+def get_latest_prediction(ticker: str, include_stale: bool = False) -> Optional[dict]:
     supabase = get_supabase()
 
     response = (
@@ -128,14 +128,18 @@ def get_latest_prediction(ticker: str) -> Optional[dict]:
     row = response.data[0]
     generated_at = row.get("generated_at")
 
-    # Important: do not return stale cached predictions.
-    # Returning None tells the API endpoint to run a fresh live prediction.
-    if not is_prediction_cache_fresh(generated_at):
+    is_fresh = is_prediction_cache_fresh(generated_at)
+
+    # Important: normal prediction reads should not return stale cached predictions.
+    # force_cache callers can opt into stale cache so portfolio/watchlist screens
+    # do not trigger expensive live prediction work for every saved card.
+    if not include_stale and not is_fresh:
         return None
 
     prediction = dict(row["prediction_json"] or {})
     prediction["cache_status"] = "supabase"
     prediction["cache_generated_at"] = generated_at
+    prediction["cache_is_fresh"] = is_fresh
 
     return prediction
 

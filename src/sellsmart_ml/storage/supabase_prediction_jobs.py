@@ -19,7 +19,6 @@ def utc_now_iso() -> str:
 def create_prediction_job(
     ticker: str,
     user_id: Optional[str] = None,
-    live: bool = False,
 ) -> dict:
     """Create a queued prediction job in Supabase.
 
@@ -37,7 +36,6 @@ def create_prediction_job(
             "status": "pending",
             "progress": 0,
             "message": "Prediction request queued.",
-            "live": bool(live),
             "created_at": now,
             "updated_at": now,
         }

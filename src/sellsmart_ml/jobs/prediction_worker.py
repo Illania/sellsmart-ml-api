@@ -26,7 +26,6 @@ def process_prediction_job(job_id: str) -> None:
         return
 
     ticker = str(job.get("ticker") or "").upper().strip()
-    live = bool(job.get("live"))
 
     if not ticker:
         mark_prediction_job_failed(job_id, "Missing ticker.")
@@ -39,11 +38,10 @@ def process_prediction_job(job_id: str) -> None:
             progress=15,
         )
 
-        if not live:
-            cached = get_latest_prediction(ticker)
-            if cached is not None:
-                mark_prediction_job_completed(job_id, cached)
-                return
+        cached = get_latest_prediction(ticker)
+        if cached is not None:
+            mark_prediction_job_completed(job_id, cached)
+            return
 
         update_prediction_job(
             job_id,
