@@ -20,7 +20,7 @@ def get_company_news_from_supabase(
     response = (
         supabase
         .table("company_news")
-        .select("*")
+        .select("ticker, news_date, headline, summary, source, url")
         .eq("ticker", ticker)
         .gte("news_date", from_date.isoformat())
         .order("news_date", desc=True)
@@ -48,13 +48,9 @@ def get_company_news_from_supabase(
             {
                 "ticker": ticker,
                 "date": pd.to_datetime(row.get("news_date")).normalize(),
-                "published_at": row.get("published_at") or row.get("news_date"),
-                "headline": headline,
-                "summary": summary,
                 "text": text,
                 "source": row.get("source"),
                 "url": row.get("url"),
-                "image_url": row.get("image_url") or row.get("image") or row.get("thumbnail_url"),
                 "news_status": "supabase",
             }
         )

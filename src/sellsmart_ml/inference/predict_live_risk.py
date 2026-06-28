@@ -148,178 +148,6 @@ def flatten_yfinance_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _safe_str(value, default="") -> str:
-    if value is None:
-        return default
-    try:
-        if pd.isna(value):
-            return default
-    except Exception:
-        pass
-    return str(value).strip() or default
-
-
-def _published_at_iso(row: pd.Series) -> str | None:
-    value = row.get("published_at") or row.get("date")
-    if value is None:
-        return None
-    try:
-        return pd.to_datetime(value).isoformat()
-    except Exception:
-        return _safe_str(value, None)
-
-
-def _sentiment_title(label: str) -> str:
-    value = (label or "neutral").lower()
-    if value == "positive":
-        return "Positive"
-    if value == "negative":
-        return "Negative"
-    return "Neutral"
-
-
-def _impact_level(row: pd.Series) -> str:
-    label = _safe_str(row.get("sentiment_label"), "neutral").lower()
-    score = abs(float(row.get("sentiment_score", 0) or 0))
-    neg_prob = float(row.get("neg_prob", 0) or 0)
-
-    if label == "negative" and (neg_prob >= 0.80 or score >= 0.80):
-        return "High"
-    if score >= 0.55 or neg_prob >= 0.60:
-        return "Medium"
-    return "Low"
-
-
-def _impact_reasons(row: pd.Series) -> list[str]:
-    label = _safe_str(row.get("sentiment_label"), "neutral").lower()
-    neg_prob = float(row.get("neg_prob", 0) or 0)
-    score = float(row.get("sentiment_score", 0) or 0)
-    reasons: list[str] = []
-
-    if label == "negative":
-        reasons.append("Negative FinBERT sentiment")
-        if neg_prob >= 0.80:
-            reasons.append("Strong negative confidence")
-    elif label == "positive":
-        reasons.append("Positive FinBERT sentiment")
-    else:
-        reasons.append("Neutral/mixed FinBERT sentiment")
-
-    if abs(score) >= 0.55:
-        reasons.append("Clear article tone")
-
-    if _safe_str(row.get("source")):
-        reasons.append("Identified news source")
-
-    if _published_at_iso(row):
-        reasons.append("Recent publication window")
-
-    return reasons[:4]
-
-
-def build_news_impact(news_df: pd.DataFrame, max_articles: int = 6) -> dict:
-    if news_df is None or news_df.empty:
-        return {
-            "has_news": False,
-            "overall_sentiment": "neutral",
-            "overall_score": 0,
-            "confidence": 0,
-            "article_count": 0,
-            "positive_articles": 0,
-            "neutral_articles": 0,
-            "negative_articles": 0,
-            "summary": "No recent company news was available for this prediction.",
-            "articles": [],
-        }
-
-    df = news_df.copy()
-    if "news_status" in df.columns:
-        df = df[~df["news_status"].astype(str).str.lower().isin(["fallback", "synthetic"])]
-
-    if df.empty:
-        return {
-            "has_news": False,
-            "overall_sentiment": "neutral",
-            "overall_score": 0,
-            "confidence": 0,
-            "article_count": 0,
-            "positive_articles": 0,
-            "neutral_articles": 0,
-            "negative_articles": 0,
-            "summary": "No recent company news was available for this prediction.",
-            "articles": [],
-        }
-
-    labels = df.get("sentiment_label", pd.Series(["neutral"] * len(df))).fillna("neutral").astype(str).str.lower()
-    scores = df.get("sentiment_score", pd.Series([0] * len(df))).fillna(0).astype(float)
-    overall_score = float(scores.mean()) if len(scores) else 0.0
-    positive_count = int((labels == "positive").sum())
-    negative_count = int((labels == "negative").sum())
-    neutral_count = int((labels == "neutral").sum())
-
-    if overall_score <= -0.15 or negative_count > max(positive_count, neutral_count):
-        overall_sentiment = "negative"
-    elif overall_score >= 0.15 or positive_count > max(negative_count, neutral_count):
-        overall_sentiment = "positive"
-    else:
-        overall_sentiment = "neutral"
-
-    confidence = min(1.0, abs(overall_score) + (max(positive_count, negative_count) / max(len(df), 1)) * 0.35)
-
-    df["_impact_rank"] = df.apply(lambda row: {"High": 3, "Medium": 2, "Low": 1}.get(_impact_level(row), 1), axis=1)
-    df["_published_sort"] = pd.to_datetime(df.get("published_at", df.get("date")), errors="coerce")
-    df = df.sort_values(["_impact_rank", "_published_sort"], ascending=[False, False]).head(max_articles)
-
-    articles = []
-    for _, row in df.iterrows():
-        headline = _safe_str(row.get("headline"))
-        text = _safe_str(row.get("text"))
-        title = headline or (text.split(". ", 1)[0] if text else "Untitled news article")
-        summary = _safe_str(row.get("summary"))
-        if not summary and text and text != title:
-            summary = text.replace(title, "", 1).strip(". ").strip()
-        if len(summary) > 240:
-            summary = summary[:237].rstrip() + "..."
-
-        label = _safe_str(row.get("sentiment_label"), "neutral").lower()
-        articles.append({
-            "title": title,
-            "source": _safe_str(row.get("source"), "News source"),
-            "published_at": _published_at_iso(row),
-            "url": _safe_str(row.get("url"), None),
-            "image_url": _safe_str(row.get("image_url"), None),
-            "summary": summary or "This article was used as part of the news-sentiment signal.",
-            "sentiment": _sentiment_title(label),
-            "sentiment_score": round(float(row.get("sentiment_score", 0) or 0), 4),
-            "impact": _impact_level(row),
-            "impact_reasons": _impact_reasons(row),
-        })
-
-    tone_word = {
-        "negative": "negative",
-        "positive": "positive",
-        "neutral": "mixed or neutral",
-    }[overall_sentiment]
-    summary = (
-        f"Recent coverage looks {tone_word}. "
-        f"SellSmart analyzed {len(news_df)} recent articles: "
-        f"{negative_count} negative, {neutral_count} neutral, and {positive_count} positive."
-    )
-
-    return {
-        "has_news": len(articles) > 0,
-        "overall_sentiment": overall_sentiment,
-        "overall_score": round(overall_score, 4),
-        "confidence": round(confidence, 4),
-        "article_count": int(len(news_df)),
-        "positive_articles": positive_count,
-        "neutral_articles": neutral_count,
-        "negative_articles": negative_count,
-        "summary": summary,
-        "articles": articles,
-    }
-
-
 # =========================================================
 # DOWNLOAD LIVE PRICE DATA
 # =========================================================
@@ -536,13 +364,9 @@ def fetch_finnhub_company_news(
                 {
                     "ticker": ticker,
                     "date": news_date,
-                    "published_at": pd.to_datetime(timestamp, unit="s").isoformat() if timestamp else news_date.isoformat(),
-                    "headline": headline,
-                    "summary": summary,
                     "text": text,
                     "source": item.get("source"),
                     "url": item.get("url"),
-                    "image_url": item.get("image") or item.get("image_url"),
                     "news_status": "live",
                 }
             )
@@ -765,7 +589,7 @@ def build_live_features(
 
     log_time("features ready")
 
-    return latest, X, news_df
+    return latest, X
 
 
 # =========================================================
@@ -782,7 +606,7 @@ def predict_ticker_risk(
 
     log_time("prediction pipeline start")
 
-    latest, X, news_df = build_live_features(
+    latest, X = build_live_features(
         ticker,
         force_refresh_prices=force_refresh_prices,
         force_refresh_news=force_refresh_news,
@@ -847,8 +671,6 @@ def predict_ticker_risk(
 
     if "news_status" in latest.columns:
         result["news_status"] = str(latest["news_status"].iloc[0])
-
-    result["news_impact"] = build_news_impact(news_df)
 
     print(f"[timing] generate_insight: {perf_counter() - step_t0:.2f}s")
     log_time("prediction done")
