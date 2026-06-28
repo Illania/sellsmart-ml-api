@@ -56,13 +56,17 @@ def _select_column(table: str, column: str) -> list[str]:
 
 
 def get_background_refresh_tickers() -> list[str]:
-    """Build a daily refresh universe from app data, with MVP defaults first.
+    """Build the daily background refresh universe.
 
     Sources:
     - default MVP tickers, so cron still works on a fresh database
-    - latest_predictions, so user-added cached tickers stay fresh
+    - latest_predictions, so already cached predictions stay fresh
     - positions and watchlist, so active user holdings are refreshed
-    - tickers/symbol_cache if present, mainly for logo/search cache continuity
+    - tickers, so the curated ticker database can gradually fill the cache
+
+    Important: symbol_cache is intentionally not used here. It is a raw
+    autocomplete/provider cache and may contain noisy symbols that are not
+    suitable for the prediction/news cron pipeline.
     """
     candidates: list[object] = []
     candidates.extend(DEFAULT_REFRESH_TICKERS)
@@ -70,6 +74,5 @@ def get_background_refresh_tickers() -> list[str]:
     candidates.extend(_select_column("positions", "ticker"))
     candidates.extend(_select_column("watchlist", "ticker"))
     candidates.extend(_select_column("tickers", "ticker"))
-    candidates.extend(_select_column("symbol_cache", "symbol"))
 
     return unique_tickers(candidates)[:MAX_BACKGROUND_TICKERS]
