@@ -1,7 +1,6 @@
-import os
-
 from __future__ import annotations
 
+import os
 from typing import Iterable
 
 from sellsmart_ml.storage.client import get_supabase
