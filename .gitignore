@@ -4,7 +4,10 @@ __pycache__/
 .env
 .env.*
 .DS_Store
+*.zip
 
 data/raw/
 data/processed/
+data/cache/live_news
+data/cache/live_prices
 
