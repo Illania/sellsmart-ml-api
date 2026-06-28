@@ -8,12 +8,10 @@ import requests
 from dotenv import load_dotenv
 from supabase import create_client
 
-load_dotenv()
+from sellsmart_ml.storage.background_job_runs import BackgroundJobRun
+from sellsmart_ml.storage.ticker_universe import get_background_refresh_tickers
 
-TICKERS = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
-    "NFLX", "JPM", "CRM", "ADBE", "INTC", "QCOM", "PYPL", "INSM",
-]
+load_dotenv()
 
 DAYS_BACK = 30
 
@@ -102,16 +100,36 @@ def save_news_to_supabase(ticker: str, items: list[dict]) -> None:
 def main() -> None:
     print("Starting news refresh...")
 
-    for ticker in TICKERS:
+    tickers = get_background_refresh_tickers()
+    job_run = BackgroundJobRun("refresh_news", tickers_total=len(tickers))
+    job_run.start(details={"tickers": tickers, "days_back": DAYS_BACK})
+
+    succeeded = 0
+    failed = 0
+    total_saved = 0
+    errors: list[dict[str, str]] = []
+
+    for ticker in tickers:
         print("")
         print(f"Refreshing {ticker}...")
 
         try:
             items = fetch_news(ticker)
             save_news_to_supabase(ticker, items)
+            succeeded += 1
+            total_saved += len(items)
 
         except Exception as exc:
+            failed += 1
+            errors.append({"ticker": ticker, "error": str(exc)})
             print(f"ERROR {ticker}: {exc}")
+
+    job_run.complete(
+        tickers_succeeded=succeeded,
+        tickers_failed=failed,
+        details={"tickers": tickers, "total_news_items": total_saved, "errors": errors},
+        error_message=f"{failed} ticker(s) failed" if failed else None,
+    )
 
     print("")
     print("News refresh completed.")

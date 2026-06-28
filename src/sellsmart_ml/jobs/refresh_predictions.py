@@ -8,33 +8,23 @@ from sellsmart_ml.inference.predict_live_risk import predict_ticker_risk
 from sellsmart_ml.storage.supabase_predictions import (
     save_latest_prediction,
 )
-
-
-TICKERS = [
-    "AAPL",
-    "MSFT",
-    "NVDA",
-    "AMZN",
-    "GOOGL",
-    "META",
-    "TSLA",
-    "AMD",
-    "NFLX",
-    "JPM",
-    "CRM",
-    "ADBE",
-    "INTC",
-    "QCOM",
-    "PYPL",
-    "INSM",
-]
+from sellsmart_ml.storage.background_job_runs import BackgroundJobRun
+from sellsmart_ml.storage.ticker_universe import get_background_refresh_tickers
 
 
 def main() -> None:
 
     print("Starting predictions refresh...")
 
-    for ticker in TICKERS:
+    tickers = get_background_refresh_tickers()
+    job_run = BackgroundJobRun("refresh_predictions", tickers_total=len(tickers))
+    job_run.start(details={"tickers": tickers})
+
+    succeeded = 0
+    failed = 0
+    errors: list[dict[str, str]] = []
+
+    for ticker in tickers:
 
         print("")
         print(f"Predicting {ticker}...")
@@ -44,10 +34,13 @@ def main() -> None:
                 ticker=ticker,
                 force_refresh_news=True,
                 force_refresh_prices=True,
-                force_refresh_market=False,
+                # Daily cron should refresh broad market context too, otherwise
+                # SPY/QQQ/VIX regime features may lag behind fresh ticker prices.
+                force_refresh_market=True,
             )
 
             save_latest_prediction(result)
+            succeeded += 1
 
             print(
                 f"Saved prediction for {ticker} | "
@@ -56,7 +49,16 @@ def main() -> None:
             )
 
         except Exception as exc:
+            failed += 1
+            errors.append({"ticker": ticker, "error": str(exc)})
             print(f"ERROR {ticker}: {exc}")
+
+    job_run.complete(
+        tickers_succeeded=succeeded,
+        tickers_failed=failed,
+        details={"tickers": tickers, "errors": errors},
+        error_message=f"{failed} ticker(s) failed" if failed else None,
+    )
 
     print("")
     print("Predictions refresh completed.")

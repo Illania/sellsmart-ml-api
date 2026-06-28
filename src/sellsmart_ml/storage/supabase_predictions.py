@@ -109,6 +109,19 @@ def save_latest_prediction(prediction: dict) -> None:
         on_conflict="ticker",
     ).execute()
 
+    # Keep an append-only history for charts, accuracy checks, and future
+    # explanations like "why did the risk score change?". Do not break
+    # prediction saving if the migration has not been run yet.
+    try:
+        history_row = clean_json_value({
+            **row,
+            "prediction_json": prediction,
+        })
+        history_row.pop("id", None)
+        supabase.table("prediction_history").insert(history_row).execute()
+    except Exception as exc:
+        print(f"[prediction-history] Failed to save history for {ticker}: {exc}")
+
 
 def get_latest_prediction(ticker: str, include_stale: bool = False) -> Optional[dict]:
     supabase = get_supabase()
