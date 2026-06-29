@@ -27,7 +27,36 @@ class BackgroundJobRun:
         self._started_perf = perf_counter()
         self._enabled = True
 
+    def mark_previous_running_as_failed(self) -> None:
+        """Close stale rows left behind by an interrupted previous run.
+
+        Render may show a cron execution as finished even if the process stopped
+        before the final Supabase status update was written. Marking previous
+        rows as failed keeps the monitoring table honest and prevents a stale
+        "running" row from staying visible forever.
+        """
+        payload = clean_json_value(
+            {
+                "status": "failed",
+                "completed_at": utc_now_iso(),
+                "error_message": "Job was left running by a previous process",
+            }
+        )
+        try:
+            (
+                get_supabase()
+                .table("background_job_runs")
+                .update(payload)
+                .eq("job_name", self.job_name)
+                .eq("status", "running")
+                .execute()
+            )
+        except Exception as exc:
+            print(f"[job-runs] Could not close stale running rows for {self.job_name}: {exc}")
+
     def start(self, details: Optional[dict[str, Any]] = None) -> None:
+        self.mark_previous_running_as_failed()
+
         payload = clean_json_value(
             {
                 "id": self.id,
@@ -35,6 +64,8 @@ class BackgroundJobRun:
                 "status": "running",
                 "started_at": utc_now_iso(),
                 "tickers_total": self.tickers_total,
+                "tickers_succeeded": 0,
+                "tickers_failed": 0,
                 "details": details or {},
             }
         )

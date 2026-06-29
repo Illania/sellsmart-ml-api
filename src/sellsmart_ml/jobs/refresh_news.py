@@ -109,27 +109,46 @@ def main() -> None:
     total_saved = 0
     errors: list[dict[str, str]] = []
 
-    for ticker in tickers:
-        print("")
-        print(f"Refreshing {ticker}...")
+    try:
+        for ticker in tickers:
+            print("")
+            print(f"Refreshing {ticker}...")
 
-        try:
-            items = fetch_news(ticker)
-            save_news_to_supabase(ticker, items)
-            succeeded += 1
-            total_saved += len(items)
+            try:
+                items = fetch_news(ticker)
+                save_news_to_supabase(ticker, items)
+                succeeded += 1
+                total_saved += len(items)
 
-        except Exception as exc:
-            failed += 1
-            errors.append({"ticker": ticker, "error": str(exc)})
-            print(f"ERROR {ticker}: {exc}")
+            except Exception as exc:
+                failed += 1
+                errors.append({"ticker": ticker, "error": str(exc)})
+                print(f"ERROR {ticker}: {exc}")
 
-    job_run.complete(
-        tickers_succeeded=succeeded,
-        tickers_failed=failed,
-        details={"tickers": tickers, "total_news_items": total_saved, "errors": errors},
-        error_message=f"{failed} ticker(s) failed" if failed else None,
-    )
+        job_run.complete(
+            tickers_succeeded=succeeded,
+            tickers_failed=failed,
+            details={
+                "tickers": tickers,
+                "total_news_items": total_saved,
+                "errors": errors[:50],
+            },
+            error_message=f"{failed} ticker(s) failed" if failed else None,
+        )
+
+    except Exception as exc:
+        job_run.complete(
+            tickers_succeeded=succeeded,
+            tickers_failed=failed + 1,
+            details={
+                "tickers": tickers,
+                "total_news_items": total_saved,
+                "errors": errors[:50],
+                "fatal_error": str(exc),
+            },
+            error_message=str(exc),
+        )
+        raise
 
     print("")
     print("News refresh completed.")
