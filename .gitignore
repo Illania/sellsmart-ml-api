@@ -8,6 +8,6 @@ __pycache__/
 
 data/raw/
 data/processed/
-data/cache/live_news
-data/cache/live_prices
+data/cache/live_news/
+data/cache/live_prices/
 
