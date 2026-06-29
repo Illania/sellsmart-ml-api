@@ -31,7 +31,10 @@ from sellsmart_ml.dataset.build_price_dataset import (
 from sellsmart_ml.features.news_features import add_news_features
 from sellsmart_ml.features.price_features import add_price_features
 from sellsmart_ml.inference.insight_generator import generate_insight
-from sellsmart_ml.storage.supabase_news import get_company_news_from_supabase
+from sellsmart_ml.storage.supabase_news import (
+    get_company_news_from_supabase,
+    update_company_news_sentiments,
+)
 
 warnings.simplefilter("ignore", PerformanceWarning)
 
@@ -441,12 +444,45 @@ def fetch_finnhub_company_news(
 # FINBERT SCORING
 # =========================================================
 
+def _has_persisted_sentiment(news_df: pd.DataFrame) -> pd.Series:
+    required = ["sentiment_label", "sentiment_score", "neg_prob"]
+
+    for col in required:
+        if col not in news_df.columns:
+            return pd.Series(False, index=news_df.index)
+
+    return (
+        news_df["sentiment_label"].notna()
+        & news_df["sentiment_score"].notna()
+        & news_df["neg_prob"].notna()
+    )
+
+
 def score_news(news_df: pd.DataFrame) -> pd.DataFrame:
 
-    print("Scoring news with FinBERT...")
+    news_df = news_df.copy()
+
+    if news_df.empty:
+        return news_df
+
+    already_scored = _has_persisted_sentiment(news_df)
+    missing_mask = ~already_scored
+    missing_count = int(missing_mask.sum())
+    reused_count = int(already_scored.sum())
+
+    if reused_count:
+        print(f"Reusing persisted sentiment for {reused_count} news row(s).")
+
+    if missing_count == 0:
+        news_df["is_negative"] = news_df["is_negative"].fillna(False).astype(int)
+        news_df["is_very_negative"] = news_df["is_very_negative"].fillna(False).astype(int)
+        return news_df
+
+    print(f"Scoring {missing_count} news row(s) with FinBERT...")
     step_t0 = perf_counter()
 
-    texts = news_df["text"].fillna("").astype(str).tolist()
+    missing_df = news_df.loc[missing_mask].copy()
+    texts = missing_df["text"].fillna("").astype(str).tolist()
 
     enc = tokenizer(
         texts,
@@ -470,23 +506,39 @@ def score_news(news_df: pd.DataFrame) -> pd.DataFrame:
         2: "neutral",
     }
 
-    news_df = news_df.copy()
-    news_df["sentiment_label"] = [label_map[pred] for pred in pred_ids]
-    news_df["sentiment_score"] = [float(p[0] - p[1]) for p in probs]
-    news_df["neg_prob"] = [float(p[1]) for p in probs]
+    scored_index = missing_df.index
 
-    news_df["is_negative"] = (
-        news_df["sentiment_label"] == "negative"
+    news_df.loc[scored_index, "sentiment_label"] = [
+        label_map[pred] for pred in pred_ids
+    ]
+    news_df.loc[scored_index, "sentiment_score"] = [
+        float(p[0] - p[1]) for p in probs
+    ]
+    news_df.loc[scored_index, "neg_prob"] = [
+        float(p[1]) for p in probs
+    ]
+
+    news_df.loc[scored_index, "is_negative"] = (
+        news_df.loc[scored_index, "sentiment_label"] == "negative"
     ).astype(int)
 
-    news_df["is_very_negative"] = (
-        news_df["neg_prob"] >= 0.80
+    news_df.loc[scored_index, "is_very_negative"] = (
+        news_df.loc[scored_index, "neg_prob"].astype(float) >= 0.80
     ).astype(int)
 
     print(f"[timing] FinBERT scoring: {perf_counter() - step_t0:.2f}s")
 
-    return news_df
+    # Persist only newly-scored Supabase rows. Fallback/local-cache rows do not
+    # have news_id and are therefore safely skipped.
+    update_company_news_sentiments(
+        news_df.loc[scored_index].copy(),
+        sentiment_model=FINBERT_MODEL,
+    )
 
+    news_df["is_negative"] = news_df["is_negative"].fillna(False).astype(int)
+    news_df["is_very_negative"] = news_df["is_very_negative"].fillna(False).astype(int)
+
+    return news_df
 
 # =========================================================
 # BUILD LIVE FEATURES
