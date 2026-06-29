@@ -62,7 +62,7 @@ def get_background_refresh_tickers() -> list[str]:
     - default MVP tickers, so cron still works on a fresh database
     - latest_predictions, so already cached predictions stay fresh
     - positions and watchlist, so active user holdings are refreshed
-    - tickers, so the curated ticker database can gradually fill the cache
+    - tickers.symbol, so the curated ticker database can gradually fill the cache
 
     Important: symbol_cache is intentionally not used here. It is a raw
     autocomplete/provider cache and may contain noisy symbols that are not
@@ -73,6 +73,6 @@ def get_background_refresh_tickers() -> list[str]:
     candidates.extend(_select_column("latest_predictions", "ticker"))
     candidates.extend(_select_column("positions", "ticker"))
     candidates.extend(_select_column("watchlist", "ticker"))
-    candidates.extend(_select_column("tickers", "ticker"))
+    candidates.extend(_select_column("tickers", "symbol"))
 
     return unique_tickers(candidates)[:MAX_BACKGROUND_TICKERS]

@@ -17,6 +17,7 @@ def main() -> None:
     print("Starting predictions refresh...")
 
     tickers = get_background_refresh_tickers()
+    print(f"Background ticker universe ({len(tickers)}): {tickers}")
     job_run = BackgroundJobRun("refresh_predictions", tickers_total=len(tickers))
     job_run.start(details={"tickers": tickers})
 

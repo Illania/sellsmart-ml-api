@@ -83,7 +83,15 @@ class BackgroundJobRun:
         details: Optional[dict[str, Any]] = None,
         error_message: Optional[str] = None,
     ) -> None:
-        status = "completed" if tickers_failed == 0 and not error_message else "failed"
+        if error_message and tickers_succeeded == 0:
+            status = "failed"
+        elif tickers_failed == 0:
+            status = "success"
+        elif tickers_succeeded > 0:
+            status = "partially_completed"
+        else:
+            status = "failed"
+
         payload = clean_json_value(
             {
                 "status": status,
