@@ -10,6 +10,7 @@ from sellsmart_ml.storage.supabase_predictions import (
 )
 from sellsmart_ml.storage.background_job_runs import BackgroundJobRun
 from sellsmart_ml.storage.ticker_universe import get_background_refresh_tickers
+from sellsmart_ml.storage.alert_history import cleanup_all_user_alert_history
 
 
 def main() -> None:
@@ -55,10 +56,18 @@ def main() -> None:
                 errors.append({"ticker": ticker, "error": str(exc)})
                 print(f"ERROR {ticker}: {exc}")
 
+        cleanup_result = {}
+        try:
+            cleanup_result = cleanup_all_user_alert_history()
+            print(f"Alert history cleanup completed: {cleanup_result}")
+        except Exception as cleanup_error:
+            cleanup_result = {"error": str(cleanup_error)}
+            print(f"Alert history cleanup failed: {cleanup_error}")
+
         job_run.complete(
             tickers_succeeded=succeeded,
             tickers_failed=failed,
-            details={"tickers": tickers, "errors": errors[:50]},
+            details={"tickers": tickers, "errors": errors[:50], "alert_history_cleanup": cleanup_result},
             error_message=f"{failed} ticker(s) failed" if failed else None,
         )
 
